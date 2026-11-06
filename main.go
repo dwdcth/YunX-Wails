@@ -44,8 +44,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("core init: %v", err)
 	}
-	// 宿主环境装配：机器标识（仅 Windows 真值）/ 代理（默认跟随系统）/ ffmpeg（自动探测）
-	coreService.ApplyHostDefaults()
+	// 宿主装配（机器标识/代理/ffmpeg）已并入 ensureCore：首个核心调用时自动执行，
+	// 不在启动时显式调用（保持惰性初始化，配合首启导入原版数据的门控）。
 
 	app := application.New(application.Options{
 		Name:        "YunX",
