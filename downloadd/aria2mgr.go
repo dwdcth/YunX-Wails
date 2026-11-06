@@ -42,11 +42,12 @@ type Aria2 struct {
 	binPath string // 最近一次探测结果（Aria2Status 用）
 	found   bool
 
-	cmd     *exec.Cmd
-	running bool
-	stopped bool // Shutdown 后不再自启
-	port    int
-	secret  string
+	cmd      *exec.Cmd
+	cmdDone  chan struct{} // 监测协程 Wait 收尸后关闭（Shutdown 等它，绝不并发 Wait）
+	running  bool
+	stopped  bool // Shutdown 后不再自启
+	port     int
+	secret   string
 
 	client    *http.Client
 	pollOnce  sync.Once
@@ -161,7 +162,10 @@ func (a *Aria2) ensureRunning() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 aria2-next: %w", err)
 	}
-	a.cmd, a.port, a.secret, a.running = cmd, port, hex.EncodeToString(secretBytes), true
+	// Wait 只允许这一个协程调用（os/exec 并发 Wait 是数据竞争，race 实测撞过）；
+	// done 由它关闭，Shutdown 等 done 而不是自己再 Wait。
+	done := make(chan struct{})
+	a.cmd, a.cmdDone, a.port, a.secret, a.running = cmd, done, port, hex.EncodeToString(secretBytes), true
 	fmt.Printf("aria2-next 已启动: pid=%d port=%d state=%s\n", cmd.Process.Pid, port, stateDir)
 
 	// 进程退出监测：置 running=false，下次 ensureRunning 重启
@@ -173,7 +177,8 @@ func (a *Aria2) ensureRunning() error {
 			a.running = false
 		}
 		a.mu.Unlock()
-		// 意外退出才提示（Shutdown 自己 Wait 会让这里拿到 no child processes，属正常）
+		close(done)
+		// 意外退出才提示（Shutdown 主动终止拿到 signal: terminated 属正常）
 		if err != nil && wasCurrent {
 			fmt.Printf("aria2-next 退出: %v\n", err)
 		}
@@ -191,8 +196,12 @@ func (a *Aria2) ensureRunning() error {
 	}
 	// 就绪超时：回收僵尸进程、复位状态，下次调用换端口重试
 	_ = cmd.Process.Kill()
+	<-done // 监测协程 Wait 收尸后再复位，避免与下次启动的 cmd 混写
+	a.mu.Lock()
 	a.running = false
 	a.cmd = nil
+	a.cmdDone = nil
+	a.mu.Unlock()
 	return fmt.Errorf("aria2-next RPC 就绪超时（端口 %d）", port)
 }
 
@@ -210,24 +219,30 @@ func pickFreePort(lo, hi int) (int, error) {
 }
 
 // Shutdown 优雅停止：SIGTERM → 等 3s → SIGKILL；之后 stopped=true 不再自启。幂等。
+// Wait 由 ensureRunning 的监测协程独占，这里只等它关闭的 done（并发 Wait 是数据竞争）。
 func (a *Aria2) Shutdown() {
 	a.mu.Lock()
 	cmd := a.cmd
+	done := a.cmdDone
 	a.stopped = true
 	a.running = false
 	a.cmd = nil
+	a.cmdDone = nil
 	a.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil || done == nil {
 		return
 	}
 	a.closeOnce.Do(func() { close(a.pollQuit) })
 	_ = cmd.Process.Signal(termSignal())
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		_ = cmd.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			// Kill 后仍未收尸：放弃等待（监测协程最终会 close(done)）
+		}
 	}
 	fmt.Println("aria2-next 已停止")
 }
