@@ -103,6 +103,10 @@ func (s *CoreService) LegacyImportStatus() string {
 // 拷贝中途失败：保留已拷贝文件、partial=true、不写决定标记（下次启动仍可询问/重试，
 // 重试策略 = 覆盖同名文件继续拷）。
 func (s *CoreService) LegacyImportDecide(doImport bool) string {
+	started := time.Now()
+	defer func() {
+		fmt.Printf("IMPORT decide=%v %6.0fms\n", doImport, float64(time.Since(started).Microseconds())/1000)
+	}()
 	targetDir := dataDirTarget()
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return errorJSON(fmt.Sprintf("创建数据目录失败: %v", err))
