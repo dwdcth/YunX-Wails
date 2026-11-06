@@ -21,6 +21,15 @@ export function ApplyHostDefaults() {
 }
 
 /**
+ * Aria2ApplyOptions 把正式设置（BT/DHT/Tracker/并发/限速）同步为 aria2-next 全局选项。
+ * 设置页保存相关键后调用；进程未运行时为空操作（下次提交任务时自动应用）。
+ * @returns {$CancellablePromise<string>}
+ */
+export function Aria2ApplyOptions() {
+    return $Call.ByID(1334774121);
+}
+
+/**
  * Aria2Status aria2 引擎状态：{running, version, port, binPath, found}。
  * found=false 表示本机找不到 aria2-next 二进制，UI 引导用户去设置 aria2Path。
  * @returns {$CancellablePromise<string>}

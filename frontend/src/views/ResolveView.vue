@@ -66,6 +66,31 @@ async function submitNormal(source: string) {
   }
 }
 
+/** 本地种子/Metalink 文件：WebKit 拿不到原生路径 → 读内容 base64 以 `base64:文件名|<b64>` 提交 */
+function pickLocalTorrent(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = '' // 允许重复选同一文件
+  if (!f) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const b64 = arrayBufferToBase64(reader.result as ArrayBuffer)
+    submitNormal(`base64:${f.name}|${b64}`)
+  }
+  reader.onerror = () => (error.value = `读取文件失败：${f.name}`)
+  reader.readAsArrayBuffer(f)
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf)
+  let bin = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(bin)
+}
+
 // 剪贴板分享链接建议（Go 宿主事件，对齐原版 ClipboardLinkPopup）
 const clipboardLink = ref('')
 
@@ -450,6 +475,11 @@ Events.On('clipboard:link', (data: unknown) => {
             <input v-model="link" class="input" placeholder="https://pan.quark.cn/s/xxxxxxxx"
                    @keydown.enter="parse()" />
           </div>
+          <label class="btn tonal" style="align-self: flex-end; cursor: pointer" title="选择本地 .torrent / .metalink / .meta4 文件">
+            本地种子/Metalink
+            <input type="file" accept=".torrent,.metalink,.meta4,.metalink3"
+                   style="display: none" @change="pickLocalTorrent" />
+          </label>
           <button class="btn" style="align-self: flex-end" :disabled="!link.trim() || loading"
                   @click="parse()">
             {{ loading ? '解析中…' : '解析' }}

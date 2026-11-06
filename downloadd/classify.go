@@ -9,6 +9,7 @@ package downloadd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,11 @@ func Classify(input string) Classification {
 	}
 	lower := strings.ToLower(s)
 
+	// ---- base64 内联载荷（前端 <input type=file> 选本地种子/Metalink：WebKit 拿不到原生路径）----
+	if strings.HasPrefix(lower, "base64:") {
+		return classifyBase64(s)
+	}
+
 	// ---- scheme 前缀类 ----
 	switch {
 	case strings.HasPrefix(lower, "ftp://"):
@@ -79,6 +85,21 @@ func Classify(input string) Classification {
 		}
 	}
 	return Classification{Err: "不支持的链接类型（支持 http/https/ftp/ftps/magnet/ed2k、本地 .torrent/.metalink 文件）"}
+}
+
+// classifyBase64 内联文件载荷：格式 `base64:文件名|<base64 内容>`。
+// 文件名保留扩展名供 classifyContent 分流（内容嗅探兜底，扩展名写错也能认）。
+func classifyBase64(s string) Classification {
+	rest := strings.TrimPrefix(s, "base64:")
+	name, b64, ok := strings.Cut(rest, "|")
+	if !ok || name == "" || b64 == "" {
+		return Classification{Err: "base64: 格式应为 base64:文件名|<base64 内容>"}
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return Classification{Err: "base64 内容解码失败: " + err.Error()}
+	}
+	return classifyContent(name, data)
 }
 
 // classifyLocalFile 本地文件分流：扩展名优先，内容嗅探兜底。

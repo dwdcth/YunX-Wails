@@ -148,7 +148,7 @@ object ExtraGateway {
             // 多账号下载（C1）：开启时构造凭证池（主账号在前），批内逐文件轮换取链；
             // 开关关 / 游客（cred 空）时池退化为一条 fresh，行为与未开启完全一致
             //（对齐桌面 ResolveViewModel:590 的 credentialRotation 轮换语义）
-            val credentialPool = if (cred.isBlank()) emptyList() else credentialRotation(plat, fresh)
+            var credentialPool = if (cred.isBlank()) emptyList() else credentialRotation(plat, fresh)
             val tasks = mutableListOf<Pair<ShareFile, String>>()
             // fid 是文件时列目录必然失败：回退按单文件下载（对齐桌面 downloadSelected 的文件直入语义）
             val listed = runCatching { repo.listFiles(session, fid, fresh).getOrNull() }.getOrNull()
@@ -162,6 +162,26 @@ object ExtraGateway {
             if (tasks.isEmpty()) {
                 state.lastError = "所选文件夹为空"
                 return
+            }
+            // 整批空间预算（对齐桌面 ResolveViewModel:600）：逐凭证校验账号剩余空间，
+            // 放不下的凭证剔出轮换池；全部放不下则中止批次。fsize 未知（-1）按 0 计。
+            if (credentialPool.isNotEmpty()) {
+                val sizes = tasks.map { it.first.fsize.coerceAtLeast(0L) }
+                val usable = mutableListOf<String>()
+                var firstSpaceFailure: Throwable? = null
+                credentialPool.forEach { c ->
+                    val checked = runCatching { repo.ensureBatchSpace(sizes, c) }
+                    if (checked.isSuccess) {
+                        usable += c
+                    } else if (firstSpaceFailure == null) {
+                        firstSpaceFailure = checked.exceptionOrNull()
+                    }
+                }
+                if (usable.isEmpty()) {
+                    state.lastError = firstSpaceFailure?.message ?: "剩余空间不足"
+                    return
+                }
+                if (usable.size < credentialPool.size) credentialPool = usable
             }
             for ((index, task) in tasks.withIndex()) {
                 val (file, relPath) = task

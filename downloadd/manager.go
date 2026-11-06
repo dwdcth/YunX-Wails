@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,6 +32,8 @@ type Manager struct {
 	hooks   Hooks
 	aria2   *Aria2
 	ftp     *FTPEngine
+	// 全局选项是否已随本轮 aria2 进程应用过（进程重启后由下次提交/手动调用重新应用）
+	optsApplied atomic.Bool
 
 	dirCache struct {
 		val string
@@ -99,6 +103,104 @@ func (m *Manager) DefaultDir() string {
 	return dir
 }
 
+// ---- aria2 全局选项（对齐原版 Gopeed 的设置面：BT/DHT/Tracker → aria2-next）----
+
+// globalOptionsFromSettings 正式设置 → aria2 全局选项（纯函数，表驱动测试）。
+//   btDhtEnabled        → bt-enable-dht
+//   btTrackers（换行/逗号混排）→ bt-tracker（逗号连接）
+//   maxConcurrentDownloads → max-concurrent-downloads
+//   downloadSpeedLimit（字节/秒，0=不限）→ max-overall-download-limit
+// 缺失键跳过（不覆盖 aria2 当前值）；并发/限速同时是 Java 内置引擎的设置，双侧各自消费同一份。
+func globalOptionsFromSettings(s map[string]any) map[string]string {
+	opts := map[string]string{}
+	if v, ok := s["btDhtEnabled"].(bool); ok {
+		opts["bt-enable-dht"] = strconv.FormatBool(v)
+	}
+	if v, ok := s["btTrackers"].(string); ok {
+		if list := normalizeTrackerList(v); list != "" {
+			opts["bt-tracker"] = list
+		}
+	}
+	if v, ok := numberOf(s["maxConcurrentDownloads"]); ok && v > 0 {
+		opts["max-concurrent-downloads"] = strconv.FormatInt(v, 10)
+	}
+	if v, ok := numberOf(s["downloadSpeedLimit"]); ok {
+		if v > 0 {
+			opts["max-overall-download-limit"] = strconv.FormatInt(v, 10)
+		} else {
+			opts["max-overall-download-limit"] = "0" // 显式解除限速
+		}
+	}
+	return opts
+}
+
+// normalizeTrackerList 换行/逗号混排的 tracker 列表 → 去空去重的逗号串（aria2 bt-tracker 口径）。
+func normalizeTrackerList(v string) string {
+	seen := map[string]bool{}
+	parts := make([]string, 0, 8)
+	for _, line := range strings.FieldsFunc(v, func(r rune) bool { return r == '\n' || r == '\r' || r == ',' }) {
+		t := strings.TrimSpace(line)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, ",")
+}
+
+// numberOf JSON 数字（map 解出来是 float64）或数字字符串 → int64。
+func numberOf(v any) (int64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int64(x), true
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return n, err == nil
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	}
+	return 0, false
+}
+
+// ApplyGlobalOptions 读正式设置并应用到 aria2（进程未运行则跳过：下次提交时统一应用）。
+// 设置页保存相关键后调用 + aria2 启动后首次提交时自动应用（applyOptionsOnce）。
+func (m *Manager) ApplyGlobalOptions() error {
+	if m.hooks.Call == nil || !m.aria2.Running() {
+		return nil
+	}
+	raw, err := m.hooks.Call(`{"cmd":"settings_list"}`)
+	if err != nil {
+		return fmt.Errorf("读设置失败: %w", err)
+	}
+	var r struct {
+		OK       bool           `json:"ok"`
+		Settings map[string]any `json:"settings"`
+	}
+	if json.Unmarshal([]byte(raw), &r) != nil || !r.OK {
+		return fmt.Errorf("settings_list 失败: %s", raw)
+	}
+	opts := globalOptionsFromSettings(r.Settings)
+	if len(opts) == 0 {
+		return nil
+	}
+	if err := m.aria2.ChangeGlobalOption(opts); err != nil {
+		return fmt.Errorf("应用 aria2 全局选项失败: %w", err)
+	}
+	return nil
+}
+
+// applyOptionsOnce 本轮进程生命周期内首次成功提交 aria2 任务后，把设置同步过去（失败不打断下载）。
+func (m *Manager) applyOptionsOnce() {
+	if m.optsApplied.Load() {
+		return
+	}
+	m.optsApplied.Store(true)
+	_ = m.ApplyGlobalOptions()
+}
+
 // SubmitResult 提交结果（单个任务或 metalink 多文件展开的多任务）。
 type SubmitResult struct {
 	TaskID  int64   `json:"taskId"`
@@ -133,6 +235,7 @@ func (m *Manager) Submit(source, saveDir string) (*SubmitResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("提交到 aria2 失败: %w", err)
 		}
+		m.applyOptionsOnce()
 		t := &Task{Engine: EngineAria2, Gid: gid, URL: c.URL, Name: c.Name, SaveDir: saveDir, Status: StatusPending}
 		if err := m.db.InsertTask(t); err != nil {
 			return nil, err
@@ -144,6 +247,7 @@ func (m *Manager) Submit(source, saveDir string) (*SubmitResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("提交种子到 aria2 失败: %w", err)
 		}
+		m.applyOptionsOnce()
 		t := &Task{Engine: EngineAria2, Gid: gid, URL: source, Name: c.Name, SaveDir: saveDir, Status: StatusPending}
 		if err := m.db.InsertTask(t); err != nil {
 			return nil, err
@@ -201,6 +305,7 @@ func (m *Manager) submitMetalink(source string, data []byte, saveDir string) (*S
 	if err != nil {
 		return nil, fmt.Errorf("提交 metalink 到 aria2 失败: %w", err)
 	}
+	m.applyOptionsOnce()
 	res := &SubmitResult{Engine: EngineAria2}
 	for i, gid := range gids {
 		name := ""

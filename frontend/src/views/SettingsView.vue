@@ -75,6 +75,10 @@ function done(msg: string) {
 async function save(key: string, value: string | number | boolean) {
   const r = await settingsSet(key, value)
   done(r.ok ? '已保存 ✓' : `失败：${r.error}`)
+  // 这些键同时驱动 aria2-next 全局选项（BT/DHT/Tracker/并发/限速）：保存后即时同步到引擎
+  if (r.ok && ['btDhtEnabled', 'btTrackers', 'maxConcurrentDownloads', 'downloadSpeedLimit'].includes(key)) {
+    try { await CoreService.Aria2ApplyOptions() } catch { /* 引擎未运行时为空操作，静默 */ }
+  }
 }
 
 // ---- 按平台线程数：key 固定 downloadThreadsFor，platform 字段区分平台 ----

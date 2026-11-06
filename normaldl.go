@@ -173,3 +173,16 @@ func normalDLOp(op func(m *downloadd.Manager) error) (string, error) {
 	b, _ := json.Marshal(map[string]any{"ok": true})
 	return string(b), nil
 }
+
+// Aria2ApplyOptions 把正式设置（BT/DHT/Tracker/并发/限速）同步为 aria2-next 全局选项。
+// 设置页保存相关键后调用；进程未运行时为空操作（下次提交任务时自动应用）。
+func (s *CoreService) Aria2ApplyOptions() string {
+	m, err := normalDLReady()
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	if err := m.ApplyGlobalOptions(); err != nil {
+		return errorJSON(err.Error())
+	}
+	return `{"ok":true}`
+}

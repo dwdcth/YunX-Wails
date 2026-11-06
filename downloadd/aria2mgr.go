@@ -398,6 +398,16 @@ func (a *Aria2) UnpauseAll() error {
 	return err
 }
 
+// ChangeGlobalOption 应用全局选项（bt-enable-dht / bt-tracker / max-concurrent-downloads /
+// max-overall-download-limit 等，aria2.changeGlobalOption）。需进程已在运行。
+func (a *Aria2) ChangeGlobalOption(opts map[string]string) error {
+	_, err := a.call("aria2.changeGlobalOption", opts)
+	return err
+}
+
+// Running 进程是否在运行（Manager 据此决定是否即时应用全局选项）。
+func (a *Aria2) Running() bool { return a.running }
+
 // ---- tellStatus 与轮询 ----
 
 type aria2Status struct {
