@@ -481,7 +481,11 @@ object DllFacade {
                         "slowPreemptMinBps" -> s.slowPreemptMinBps = value.toLong()
                         "slowPreemptMinAgeMs" -> s.slowPreemptMinAgeMs = value.toLong()
                         "previewEngine" -> s.previewEngine = value
-                        "diagnosticMode" -> s.diagnosticMode = value.toBoolean()
+                        "diagnosticMode" -> {
+                            s.diagnosticMode = value.toBoolean()
+                            // 动态生效（对齐原版 SettingsScreen:672）：开启即起写线程，关闭时核心内部先落最后事件
+                            runCatching { com.yunx.app.util.DiagnosticLog.setEnabled(value.toBoolean()) }
+                        }
                         "downloadDebug" -> s.downloadDebug = value.toBoolean()
                         "fullFileSha256" -> s.fullFileSha256 = value.toBoolean()
                         "ignoreSslCert" -> s.ignoreSslCert = value.toBoolean()

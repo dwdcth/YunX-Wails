@@ -58,6 +58,16 @@ async function parse(text?: string, qualityId = '') {
   }
 }
 
+// ---- 在线预览（对齐原版 VideoPreviewOverlay：WebKit 原生 <video> 播放器）----
+// DASH 平台（B 站等）音视频分离：直链只有视频轨 → 无声预览，下载时由核心自动合轨。
+
+const previewMedia = ref<VideoMedia | null>(null)
+
+function openPreview(m: VideoMedia) {
+  if (!m.url) return
+  previewMedia.value = m
+}
+
 // ---- 下载模式弹窗（.mask/.dlg 模式，对齐 DirPickerModal）----
 
 const modeTarget = ref<VideoMedia | null>(null)
@@ -267,6 +277,7 @@ onMounted(() => {
           <span v-if="m.isHls" class="chip plain" style="margin-left: 6px">HLS</span>
         </span>
         <span class="fmeta">{{ fmtBytes(m.size) }}</span>
+        <button class="btn text small" title="在线预览（DASH 分离源无声，下载后自动合轨）" @click="openPreview(m)">预览</button>
         <button class="btn tonal small" @click="askDownload(m)">下载</button>
       </div>
 
@@ -300,6 +311,21 @@ onMounted(() => {
           <b>仅视频</b><span>只下载画面（无音轨）</span>
         </div>
         <div v-if="modeError" class="banner error" style="margin-top: 10px">{{ modeError }}</div>
+      </div>
+    </div>
+
+    <!-- 在线预览（对齐原版 VideoPreviewOverlay；WebKit 原生播放器带进度/音量/倍速/全屏） -->
+    <div v-if="previewMedia" class="preview-mask" @click.self="previewMedia = null">
+      <div class="preview-box">
+        <div class="preview-bar">
+          <b>{{ previewMedia.label || '视频预览' }}</b>
+          <span v-if="previewMedia.audioUrl" class="dim" style="font-size: 12px">
+            DASH 音视频分离：预览无声，下载后自动合轨
+          </span>
+          <button class="btn text small" @click="previewMedia = null">关闭</button>
+        </div>
+        <video :key="previewMedia.url" :src="previewMedia.url" controls autoplay
+               style="width: 100%; height: calc(100% - 44px); background: #000" />
       </div>
     </div>
   </div>
@@ -347,4 +373,13 @@ onMounted(() => {
 .modeitem:hover { background: var(--surface-container); border-color: var(--primary); }
 .modeitem b { font-size: 14px; }
 .modeitem span { font-size: 12.5px; color: var(--on-bg-variant); }
+/* 在线预览覆盖层（近全屏，WebKit 原生 <video>） */
+.preview-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: flex;
+  align-items: center; justify-content: center; z-index: 60; }
+.preview-box { width: min(88vw, 1100px); height: min(78vh, 720px); display: flex;
+  flex-direction: column; background: var(--surface, #1e1e1e); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5); }
+.preview-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; height: 44px;
+  box-sizing: border-box; }
+.preview-bar b { flex: 1; font-size: 14px; }
 </style>

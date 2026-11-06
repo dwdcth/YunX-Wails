@@ -922,6 +922,15 @@ onMounted(() => {
         <!-- 开→关先二次确认（关闭即清空全部日志，不可恢复）；取消则开关回弹 -->
         <i class="switch" :class="{ on: s.downloadDebug }" @click="onDownloadDebugToggle" />
       </div>
+      <div class="row" style="margin-top: 10px">
+        <span style="flex: 1">诊断模式
+          <span class="dim" style="display: block; font-size: 12px; margin-top: 2px">
+            开启后记录诊断日志（数据库结构/网络事件等）到数据目录 diagnostic_logs，用于问题排查；即时生效
+          </span>
+        </span>
+        <i class="switch" :class="{ on: s.diagnosticMode }"
+           @click="s.diagnosticMode = !s.diagnosticMode; save('diagnosticMode', s.diagnosticMode)" />
+      </div>
       <p class="hint" style="margin: 10px 0 0">
         多账号下载与单文件多源分片开启前有二次风险确认；默认值：HTTP/2 关、读缓冲 64 KB、慢连接抢占开（12 KB/s · 15 秒）
       </p>
