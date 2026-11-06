@@ -5,9 +5,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  bookmarkAdd, downloadSubmit, fmtBytes, githubDownload, githubResolve, linkHistoryClear,
-  linkHistoryDelete, linkHistoryList, shareDownload, shareFolderDownload, shareLink, shareList,
-  shareResolve, shareTransfer, shareTransferBatch,
+  bookmarkAdd, downloadSubmit, fmtBytes, githubDownload, githubResolve, linkHistoryAdd,
+  linkHistoryClear, linkHistoryDelete, linkHistoryList, shareDownload, shareFolderDownload,
+  shareLink, shareList, shareResolve, shareTransfer, shareTransferBatch,
   type GithubAsset, type LinkHistoryItem, type ShareDetail, type ShareFile,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
@@ -173,6 +173,49 @@ async function refreshHistory() {
   try { history.value = await linkHistoryList() } catch { /* 网络外错误忽略 */ }
 }
 
+// ---- 解析历史弹窗（对齐原版 LinkHistoryDialog：搜索 / 重解析 / 单条删除 / 清空）----
+
+const historyOpen = ref(false)
+const historyQuery = ref('')
+
+/** 本地实时过滤（链接 / 标题 / 平台，忽略大小写），比走 DAO search 更跟手 */
+const filteredHistory = computed(() => {
+  const q = historyQuery.value.trim().toLowerCase()
+  if (!q) return history.value
+  return history.value.filter((h) =>
+    h.url.toLowerCase().includes(q) ||
+    h.title.toLowerCase().includes(q) ||
+    h.platform.toLowerCase().includes(q))
+})
+
+function openHistory() {
+  historyQuery.value = ''
+  historyOpen.value = true
+  refreshHistory()
+}
+
+/** 历史时间显示（对齐原版 SimpleDateFormat("MM-dd HH:mm")） */
+function fmtHistoryTime(ts: number): string {
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+async function deleteHistory(h: LinkHistoryItem) {
+  try {
+    await linkHistoryDelete(h.id)
+    await refreshHistory()
+  } catch { /* 删除失败下次刷新自然可见 */ }
+}
+
+async function clearHistory() {
+  if (!confirm('确定清空全部解析历史？')) return
+  try {
+    await linkHistoryClear()
+    await refreshHistory()
+  } catch { /* 同上 */ }
+}
+
 function flash(msg: string) {
   toast.value = msg
   setTimeout(() => (toast.value = ''), 2600)
@@ -186,12 +229,23 @@ async function parseGithub(url: string) {
     if (r.ok) {
       gh.value = { url, repo: r.repo ?? '', tag: r.tag ?? '', assets: r.assets ?? [] }
       flash(`GitHub Release：${gh.value.repo} ${gh.value.tag} · ${gh.value.assets.length} 个附件`)
+      recordGithubHistory(url, gh.value.repo)
     } else {
       error.value = r.error ?? 'GitHub 解析失败'
     }
   } catch (e) {
     error.value = String(e)
   }
+}
+
+/** GitHub 解析核心不自动记历史（share_resolve 才记），前端补记（同 URL 1 小时内不重复，对齐核心去重口径） */
+async function recordGithubHistory(url: string, title: string) {
+  try {
+    const last = history.value.find((h) => h.url === url)
+    if (last && Date.now() - last.createTime < 3_600_000) return
+    await linkHistoryAdd(url, title, 'GITHUB')
+    refreshHistory()
+  } catch { /* 记历史失败不影响解析 */ }
 }
 
 async function parse(text?: string, pwdOverride?: string) {
@@ -306,6 +360,7 @@ async function saveBookmark() {
 }
 
 async function useHistory(h: LinkHistoryItem) {
+  historyOpen.value = false
   link.value = h.url
   pwd.value = h.pwd
   parse(h.url, h.pwd)
@@ -351,6 +406,10 @@ Events.On('clipboard:link', (data: unknown) => {
           <button class="btn" style="align-self: flex-end" :disabled="!link.trim() || loading"
                   @click="parse()">
             {{ loading ? '解析中…' : '解析' }}
+          </button>
+          <button class="btn tonal" style="align-self: flex-end" title="查看解析历史"
+                  @click="openHistory">
+            <AppIcon name="history" :size="15" /> 历史
           </button>
         </div>
         <div class="row">
@@ -486,22 +545,47 @@ Events.On('clipboard:link', (data: unknown) => {
       </div>
     </div>
 
-    <div v-if="history.length" class="card">
-      <div class="row" style="justify-content: space-between">
-        <h3 style="margin: 0"><AppIcon name="history" :size="16" /> 解析历史（与原版互通）</h3>
-        <button class="btn text small" @click="linkHistoryClear().then(refreshHistory)">清空</button>
-      </div>
-      <div v-for="h in history" :key="h.id" class="row"
-           style="justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--outline-variant)">
-        <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 560px"
-              :title="h.url">
-          <b v-if="h.title">{{ h.title }}</b> · {{ h.url }}
-        </span>
-        <span class="row" style="flex: none">
-          <span class="chip plain">{{ h.platform }}</span>
-          <button class="btn text small" @click="useHistory(h)">重解析</button>
-          <button class="btn text small" @click="linkHistoryDelete(h.id).then(refreshHistory)">删除</button>
-        </span>
+    <!-- 解析历史弹窗（对齐原版 LinkHistoryDialog：搜索 / 重解析 / 单条删除 / 清空） -->
+    <div v-if="historyOpen" class="mask" @click.self="historyOpen = false">
+      <div class="dlg dlg-wide">
+        <div class="row" style="justify-content: space-between; margin-bottom: 10px">
+          <h3 style="margin: 0"><AppIcon name="history" :size="16" /> 解析历史</h3>
+          <button class="btn text small" @click="historyOpen = false">关闭</button>
+        </div>
+
+        <!-- 搜索框（本地过滤链接 / 标题 / 平台） -->
+        <div class="row" style="gap: 8px; margin-bottom: 8px">
+          <input v-model="historyQuery" class="input" style="flex: 1; min-width: 0"
+                 placeholder="搜索链接 / 标题 / 平台" />
+          <button v-if="historyQuery" class="btn text small" title="清空搜索"
+                  @click="historyQuery = ''">✕</button>
+        </div>
+
+        <div class="row" style="justify-content: space-between; margin-bottom: 8px">
+          <span class="hint">共 {{ filteredHistory.length }} 条（与原版互通）</span>
+          <button v-if="history.length" class="btn text small" style="color: var(--error)"
+                  @click="clearHistory">清空</button>
+        </div>
+
+        <div v-if="filteredHistory.length === 0" class="empty" style="padding: 24px 0">
+          <p style="margin: 0">{{ history.length === 0 ? '暂无历史记录' : '无匹配结果' }}</p>
+        </div>
+        <div v-else class="hlist">
+          <div v-for="h in filteredHistory" :key="h.id" class="hrow" title="点击重新解析"
+               @click="useHistory(h)">
+            <div class="hmain">
+              <div class="htitle">{{ h.title || h.url }}</div>
+              <div class="hurl" :title="h.url">{{ h.url }}</div>
+              <div class="row" style="gap: 8px; flex: none">
+                <span class="chip plain">{{ h.platform }}</span>
+                <span class="hmeta">{{ fmtHistoryTime(h.createTime) }}</span>
+                <span v-if="h.pwd" class="hmeta">提取码 {{ h.pwd }}</span>
+              </div>
+            </div>
+            <button class="btn tonal small" @click.stop="useHistory(h)">重解析</button>
+            <button class="btn text small" title="删除" @click.stop="deleteHistory(h)">✕</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -533,4 +617,18 @@ Events.On('clipboard:link', (data: unknown) => {
   align-items: center; justify-content: center; z-index: 40; }
 .dlg { background: var(--surface); border-radius: var(--radius-lg); padding: 18px 20px;
   width: min(480px, 92vw); border: 1px solid var(--outline-variant); }
+
+/* 解析历史弹窗（行样式对齐原版 HistoryItem：标题 + 链接 + 平台/时间/提取码 + 操作） */
+.dlg-wide { width: min(640px, 92vw); }
+.hint { font-size: 12.5px; color: var(--on-bg-variant); }
+.hlist { max-height: 360px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.hrow { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-radius: var(--radius); background: var(--surface-container); cursor: pointer; }
+.hrow:hover { background: var(--surface-container-high); }
+.hmain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.htitle { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.hurl { font-size: 12px; color: var(--on-bg-variant); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.hmeta { font-size: 12px; color: var(--on-bg-variant); }
 </style>

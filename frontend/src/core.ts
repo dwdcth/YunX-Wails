@@ -261,6 +261,13 @@ export async function linkHistoryList() {
   return r.history ?? []
 }
 
+/** 手动补记一条历史（share_resolve 解析成功时核心已自动记录；GitHub 等分支由前端补记） */
+export function linkHistoryAdd(url: string, title = '', platform = '', pwd = '') {
+  return call<{ ok: boolean; stored?: boolean; error?: string }>('link_history_add', {
+    url, title, platform, pwd,
+  })
+}
+
 export function linkHistoryDelete(id: number) { return call('link_history_delete', { id }) }
 export function linkHistoryClear() { return call('link_history_clear') }
 
@@ -274,8 +281,12 @@ export async function bookmarkList() {
   return r.bookmarks ?? []
 }
 
-export function bookmarkAdd(link: string, title: string, platform: string, pwd = '') {
-  return call('bookmark_add', { link, title, platform, pwd })
+/** category 传空则由核心落默认分类「未分类」（DLL bookmark_add 的 optString 默认值） */
+export function bookmarkAdd(link: string, title: string, platform: string, pwd = '', category = '') {
+  return call<{ ok: boolean; id?: number; error?: string }>('bookmark_add', {
+    link, title, platform, pwd,
+    ...(category ? { category } : {}),
+  })
 }
 
 export function bookmarkDelete(id: number) { return call('bookmark_delete', { id }) }
