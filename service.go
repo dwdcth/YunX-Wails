@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -61,11 +62,28 @@ func (s *CoreService) callLoaded(requestJSON string) (string, error) {
 }
 
 // coreCall 所有经核心通道的调用统一入口：先确保核心已加载。
+// 命令级日志：排查「界面空/命令是否到达核心」类问题的第一观测点（截断长请求）。
 func (s *CoreService) coreCall(requestJSON string) (string, error) {
 	if err := s.ensureCore(); err != nil {
 		return "", err
 	}
-	return s.core.Call(requestJSON)
+	start := time.Now()
+	resp, err := s.core.Call(requestJSON)
+	cmd := requestJSON
+	if i := strings.Index(cmd, "\"cmd\""); i >= 0 {
+		cmd = cmd[i:]
+	}
+	if len(cmd) > 48 {
+		cmd = cmd[:48] + "…"
+	}
+	status := "ok"
+	if err != nil {
+		status = "ERR " + err.Error()
+	} else if strings.Contains(resp, `"ok":false`) {
+		status = "core-false: " + oneLine(resp)
+	}
+	fmt.Printf("CORE %6.0fms %-50s %s\n", float64(time.Since(start).Microseconds())/1000, cmd, status)
+	return resp, err
 }
 
 // Ping 连通性探针（期望 42）。

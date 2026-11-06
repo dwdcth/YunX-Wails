@@ -195,6 +195,39 @@ object DllFacade {
 
     private val announcementApi = com.yunx.app.data.announcement.AnnouncementApi
     private val announcementReadStore by lazy { com.yunx.app.data.announcement.AnnouncementReadStore() }
+
+    // 公告列表缓存 + 后台刷新：announcements_list 绝不同步走网络——
+    // 命令通道是串行的（isolate 线程绑定），公告服务器不可达时一次 fetch 会把
+    // connect 15s/read 30s/call 45s 的超时整个压在通道上，accounts/download 等全部排队，
+    // 界面表现为「全空」（2026-11-06 实测事故）。缓存立即回，刷新丢给内部线程
+    //（native image 里核心自建线程安全，下载协程同机制），前端稍后再取即得新数据。
+    private val announceCache = java.util.concurrent.ConcurrentHashMap<Int, JSONObject>()
+    private val announceFetching = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun refreshAnnounceAsync(page: Int) {
+        if (!announceFetching.compareAndSet(false, true)) return
+        Thread {
+            try {
+                val r = kotlinx.coroutines.runBlocking { announcementApi.fetchPage(page) }
+                if (r is com.yunx.app.data.announcement.AnnouncementApi.Result.Success) {
+                    val arr = JSONArray()
+                    for (a in r.data.list) {
+                        arr.put(JSONObject()
+                            .put("id", a.id).put("title", a.title).put("summary", a.summary)
+                            .put("publishAt", a.publishAt ?: JSONObject.NULL)
+                            .put("isPinned", a.isPinned))
+                    }
+                    announceCache[page] = JSONObject()
+                        .put("total", r.data.total).put("page", r.data.page)
+                        .put("hasMore", r.data.hasMore).put("announcements", arr)
+                }
+            } catch (_: Throwable) {
+                // 刷新失败保缓存；下次调用再试
+            } finally {
+                announceFetching.set(false)
+            }
+        }.apply { isDaemon = true; name = "announce-refresh" }.start()
+    }
     private val githubApi by lazy { com.yunx.app.data.network.GitHubApi() }
 
     /**
@@ -1346,22 +1379,21 @@ object DllFacade {
                 "announcements_list" -> {
                     val page = req.optInt("page", 1)
                     val readIds = announcementReadStore.readIds.value
-                    when (val r = runBlocking { announcementApi.fetchPage(page) }) {
-                        is com.yunx.app.data.announcement.AnnouncementApi.Result.Success -> {
-                            val arr = JSONArray()
-                            for (a in r.data.list) {
-                                arr.put(JSONObject()
-                                    .put("id", a.id).put("title", a.title).put("summary", a.summary)
-                                    .put("publishAt", a.publishAt ?: JSONObject.NULL)
-                                    .put("isPinned", a.isPinned)
-                                    .put("read", readIds.contains(a.id)))
-                            }
-                            resp.put("total", r.data.total).put("page", r.data.page)
-                                .put("hasMore", r.data.hasMore).put("announcements", arr)
+                    val cached = announceCache[page]
+                    if (cached != null) {
+                        val arr = cached.optJSONArray("announcements") ?: JSONArray()
+                        for (i in 0 until arr.length()) {
+                            arr.optJSONObject(i)?.put("read", readIds.contains(arr.optJSONObject(i)!!.optString("id")))
                         }
-                        is com.yunx.app.data.announcement.AnnouncementApi.Result.Failure ->
-                            return error("公告获取失败：${r.message}").toString()
+                        resp.put("total", cached.optInt("total")).put("page", cached.optInt("page"))
+                            .put("hasMore", cached.optBoolean("hasMore"))
+                            .put("fromCache", true).put("announcements", arr)
+                    } else {
+                        // 首跑无缓存：立即回空列表（不占通道），后台刷新后前端再来取
+                        resp.put("total", 0).put("page", page).put("hasMore", false)
+                            .put("fromCache", false).put("announcements", JSONArray())
                     }
+                    refreshAnnounceAsync(page)
                 }
 
                 "announcement_detail" -> {

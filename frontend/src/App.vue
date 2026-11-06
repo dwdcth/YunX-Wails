@@ -66,10 +66,12 @@ function finishGate() {
   settingsList().then((s) => {
     if (s) setThemeMode((['system', 'light', 'dark'] as const)[s.darkMode] ?? 'system')
   }).catch(() => {})
-  // 公告未读角标
-  announcementsList().then((r) => {
+  // 公告未读角标（DLL 侧立即回缓存+后台刷新：首跑常为空，12s 后补取一次）
+  const pollBadge = () => announcementsList().then((r) => {
     if (r.ok) hasUnread.value = (r.announcements ?? []).some((a) => !a.read)
   }).catch(() => {})
+  pollBadge()
+  setTimeout(pollBadge, 12_000)
 }
 
 /** 导入 = Decide(true)：ok 短提示后放行；失败停在 err 相位，可重试（覆盖续拷）或放弃 */
