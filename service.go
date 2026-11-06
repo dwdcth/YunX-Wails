@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -23,29 +24,58 @@ var wailsApp *application.App
 type CoreService struct {
 	core   *yunxcore.Core
 	bridge *browserBridge
+
+	// 核心惰性初始化：NewCoreService 不再立即 yunxcore.Open()（那会瞬间建 isolate→开库→
+	// 生成密钥），给「首启先问 LegacyImport、用户决定后再动数据目录」留出窗口；
+	// 也不阻塞主线程启动。首次真正用到核心的调用在 ensureCore 里完成 Open + 宿主装配。
+	coreOnce sync.Once
+	coreErr  error
 }
 
 func NewCoreService() (*CoreService, error) {
-	core, err := yunxcore.Open()
-	if err != nil {
-		return nil, err
+	return &CoreService{}, nil
+}
+
+// ensureCore 首次调用时加载核心并执行启动装配（对齐原 main.go：Open + ApplyHostDefaults）。
+// 失败原因记在 coreErr，后续调用按原错误路径返回（不重试，与旧版 Open 失败即 Fatal 的语义一致）。
+func (s *CoreService) ensureCore() error {
+	s.coreOnce.Do(func() {
+		core, err := yunxcore.Open()
+		if err != nil {
+			s.coreErr = err
+			return
+		}
+		s.core = core
+		// 宿主环境装配：机器标识（仅 Windows 真值）/ 代理（默认跟随系统）/ ffmpeg（自动探测）
+		s.ApplyHostDefaults()
+	})
+	return s.coreErr
+}
+
+// coreCall 所有经核心通道的调用统一入口：先确保核心已加载。
+func (s *CoreService) coreCall(requestJSON string) (string, error) {
+	if err := s.ensureCore(); err != nil {
+		return "", err
 	}
-	return &CoreService{core: core}, nil
+	return s.core.Call(requestJSON)
 }
 
 // Ping 连通性探针（期望 42）。
 func (s *CoreService) Ping() int {
+	if err := s.ensureCore(); err != nil {
+		return -1 // 核心不可用（保持 int 返回签名；错误细节看日志/Call）
+	}
 	return s.core.Ping()
 }
 
 // Call 通用命令通道：请求/响应都是 JSON 字符串（协议见 dll 模块 DllFacade）。
 func (s *CoreService) Call(requestJSON string) (string, error) {
-	return s.core.Call(requestJSON)
+	return s.coreCall(requestJSON)
 }
 
 // Version 核心版本：{"cmd":"version"} 的便捷封装。
 func (s *CoreService) Version() (string, error) {
-	return s.core.Call(`{"cmd":"version"}`)
+	return s.coreCall(`{"cmd":"version"}`)
 }
 
 // ParseShare 解析分享文案（纯本地）：返回 {"ok":true,"found":...,"platform":...,"shareId":...,"pwd":...}。
@@ -54,7 +84,7 @@ func (s *CoreService) ParseShare(text string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal: %w", err)
 	}
-	return s.core.Call(string(req))
+	return s.coreCall(string(req))
 }
 
 // ---- 宿主环境（代理 / ffmpeg / 机器标识）：探测在 Go，核心只收结果 ----
@@ -107,7 +137,7 @@ func (s *CoreService) SetProxy(mode, host string, port int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := s.core.Call(string(raw))
+	resp, err := s.coreCall(string(raw))
 	if err != nil {
 		return resp, err
 	}
@@ -115,7 +145,7 @@ func (s *CoreService) SetProxy(mode, host string, port int) (string, error) {
 	for k, v := range map[string]string{
 		"proxyMode": mode, "proxyHost": host, "proxyPort": strconv.Itoa(port),
 	} {
-		if r, err := s.core.Call(fmt.Sprintf(`{"cmd":"settings_set","key":%q,"value":%q}`, k, v)); err != nil || !strings.Contains(r, `"ok":true`) {
+		if r, err := s.coreCall(fmt.Sprintf(`{"cmd":"settings_set","key":%q,"value":%q}`, k, v)); err != nil || !strings.Contains(r, `"ok":true`) {
 			return resp, fmt.Errorf("settings_set(%s) 失败: %s", k, r)
 		}
 	}
@@ -132,7 +162,7 @@ func (s *CoreService) SetFfmpeg(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := s.core.Call(string(raw))
+	resp, err := s.coreCall(string(raw))
 	if err != nil {
 		return resp, err
 	}
@@ -142,13 +172,14 @@ func (s *CoreService) SetFfmpeg(path string) (string, error) {
 
 // ApplyHostDefaults 启动装配：机器标识（显式配置 > 系统真值）、代理（正式设置的 proxyMode，默认 direct）、
 // ffmpeg（显式配置路径）。失败的项记日志不阻断启动。
+// 在 ensureCore 里核心加载成功后被自动调用；也可在外部显式调用（幂等，重复注入无害）。
 func (s *CoreService) ApplyHostDefaults() {
 	id, _ := s.kvGet("settings.machineId")
 	if id == "" {
 		id = hostenv.MachineId()
 	}
 	if id != "" {
-		if _, err := s.core.Call(`{"cmd":"host_set_machine_id","id":"` + id + `"}`); err == nil {
+		if _, err := s.coreCall(`{"cmd":"host_set_machine_id","id":"` + id + `"}`); err == nil {
 			fmt.Println("宿主注入：机器标识已注入核心")
 		}
 	}
@@ -174,7 +205,7 @@ func (s *CoreService) ApplyHostDefaults() {
 
 // settingsSnapshot 经核心 settings_list 读正式设置（与原版同一存储）。
 func (s *CoreService) settingsSnapshot() (map[string]any, error) {
-	raw, err := s.core.Call(`{"cmd":"settings_list"}`)
+	raw, err := s.coreCall(`{"cmd":"settings_list"}`)
 	if err != nil {
 		return map[string]any{}, err
 	}
@@ -211,7 +242,7 @@ func (s *CoreService) AuthBackupExport(password string) (string, error) {
 		return `{"ok":true,"canceled":true}`, nil
 	}
 	req, _ := json.Marshal(map[string]any{"cmd": "auth_export", "path": path, "password": password})
-	return s.core.Call(string(req))
+	return s.coreCall(string(req))
 }
 
 // AuthBackupImport 打开「打开文件」对话框导入认证备份（.yunx 需提供导出时的口令）。
@@ -230,7 +261,7 @@ func (s *CoreService) AuthBackupImport(password string) (string, error) {
 		return `{"ok":true,"canceled":true}`, nil
 	}
 	req, _ := json.Marshal(map[string]any{"cmd": "auth_import", "path": path, "password": password})
-	return s.core.Call(string(req))
+	return s.coreCall(string(req))
 }
 
 // OpenFile 用系统默认程序打开文件（xdg-open / Windows ShellExecute）。
@@ -281,7 +312,7 @@ func (s *CoreService) Shutdown() (string, error) {
 // ---- 内部帮手 ----
 
 func (s *CoreService) kvGet(key string) (string, bool) {
-	raw, err := s.core.Call(fmt.Sprintf(`{"cmd":"kv_get","key":%q}`, key))
+	raw, err := s.coreCall(fmt.Sprintf(`{"cmd":"kv_get","key":%q}`, key))
 	if err != nil {
 		return "", false
 	}
@@ -296,7 +327,7 @@ func (s *CoreService) kvGet(key string) (string, bool) {
 }
 
 func (s *CoreService) kvPut(key, value string) {
-	_, _ = s.core.Call(fmt.Sprintf(`{"cmd":"kv_put","key":%q,"value":%q}`, key, value))
+	_, _ = s.coreCall(fmt.Sprintf(`{"cmd":"kv_put","key":%q,"value":%q}`, key, value))
 }
 
 func marshal(v any) (string, error) {

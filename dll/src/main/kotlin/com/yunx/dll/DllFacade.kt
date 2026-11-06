@@ -131,6 +131,7 @@ import java.util.prefs.Preferences
  * - download_debug_info {taskId, limit?} → {task, stats, chunks[], resources, sourceCount,
  *   logs[](最近 N 条), logTotal, enabled, env, snapshot}（拉取式只读快照，前端 5 秒轮询）
  * - download_debug_export {taskId} → {path, fileName}（完整日志写 <缓存目录>/logs，core 同源导出 API）
+ * - download_debug_preempt {taskId, key} → {preempted}（手动强制重连某路分片；任务/分片不存在优雅 ok:false）
  *
  * 公告与更新（网络命令）：
  * - announcements_list {page?} → 列表（含已读标记）；announcement_detail {id}；announcement_mark_read {id}
@@ -139,10 +140,19 @@ import java.util.prefs.Preferences
 object DllFacade {
 
     init {
-        // 与桌面形态同源：KeyValueStore 走 java.util.prefs（Linux: ~/.java/.userPrefs/yunx/*，
-        // Windows: HKCU\Software\JavaSoft\Prefs\yunx\*），与 Compose 原版 / Linux 移植版读写同一份数据。
+        // prefs 隔离（本应用数据目录已与原版分家，prefs 节点同样分家，两个环境变量）：
+        // - YUNX_PREFS_USER_ROOT：非空则设为 java.util.prefs.userRoot 系统属性（prefs 根目录整体
+        //   搬家，native 冒烟/测试用；替代过去只有 JVM -D 才能指定的办法）。必须在任何
+        //   Preferences 访问前生效，放 init 最前。
+        // - YUNX_PREFS_NODE：节点前缀（见 prefsStoreFactory），默认 yunx-wails ⇒ 与原版 yunx 分离。
+        System.getenv("YUNX_PREFS_USER_ROOT")?.takeIf { it.isNotBlank() }?.let {
+            System.setProperty("java.util.prefs.userRoot", it)
+        }
+        // 与桌面形态同源：KeyValueStore 走 java.util.prefs（Linux: ~/.java/.userPrefs/<节点前缀>/*，
+        // Windows: HKCU\Software\JavaSoft\Prefs\<节点前缀>\*）。默认前缀 yunx-wails（本应用独立，
+        // 与原版 yunx 互不干扰）；YUNX_PREFS_NODE 可覆盖（设回 "yunx" 可恢复与原版互通/共享）。
         // 必须在任何 AppContext/HostStores.named 触碰前生效（named 结果会被缓存）。
-        // native 环境若不可用则退回默认 FileKeyValueStore（仅损失与原版互通）。
+        // native 环境若不可用则退回默认 FileKeyValueStore（仅损失设置互通）。
         runCatching { HostStores.factory = ::prefsStoreFactory }
         // 启动装配（对齐桌面 Main.kt 的 AppContext.init()）：建目录 + 旧数据目录迁移 +
         // 「储存目录」搬迁后旧位置残留清理（storage_migrate_db 记下的待清理标记在这里消费）。
@@ -1318,6 +1328,21 @@ object DllFacade {
                     resp.put("path", file.absolutePath).put("fileName", file.name)
                 }
 
+                "download_debug_preempt" -> {
+                    // 手动强制重连某一路分片（调试页的「强制重连」按钮；core DownloadManager.forcePreemptChunk）：
+                    // 掐断在飞连接、换新连接从已收字节续传。任务不存在 / 分片不在活跃集 → 优雅 ok:false。
+                    val id = req.getLong("taskId")
+                    val key = req.optString("key")
+                    if (key.isBlank()) return error("key 不能为空").toString()
+                    val task = runBlocking { AppDatabase.get().downloadTaskDao().get(id) }
+                        ?: return error("任务不存在：$id").toString()
+                    val preempted = downloadManager().forcePreemptChunk(task.id, key)
+                    if (!preempted) {
+                        return error("分片不在活跃集（未在下载或 key 不匹配）：$key").toString()
+                    }
+                    resp.put("preempted", key)
+                }
+
                 "announcements_list" -> {
                     val page = req.optInt("page", 1)
                     val readIds = announcementReadStore.readIds.value
@@ -1536,14 +1561,23 @@ object DllFacade {
         }
     }
 
-    /** 与桌面 prefsStoreFactory 完全同源的节点映射（desktop/.../host/PrefsKeyValueStore.kt）。 */
+    /** 节点前缀：YUNX_PREFS_NODE 可覆盖（默认 yunx-wails，与原版 yunx 分家、可双开互不干扰）。 */
+    private fun prefsNodePrefix(): String =
+        System.getenv("YUNX_PREFS_NODE")?.takeIf { it.isNotBlank() } ?: "yunx-wails"
+
+    /** 与桌面 prefsStoreFactory 完全同源的节点映射（desktop/.../host/PrefsKeyValueStore.kt），
+     *  仅节点前缀可经 YUNX_PREFS_NODE 覆盖。
+     *  ★ 前缀在函数内现取（不能做成 object 属性）：本 init 块里的 AppContext.init() 就会触发
+     *    HostStores.named → 本工厂，若读 object 属性则其初始化器尚未执行（声明序在 init 之后），
+     *    会拿到 null 前缀写出 "null/misc" 节点。 */
     private fun prefsStoreFactory(name: String): KeyValueStore {
+        val prefix = prefsNodePrefix()
         val node = when (name) {
-            "misc" -> "yunx/misc"
-            "settings" -> "yunx/settings"
-            "xunlei_fp" -> "yunx/xunlei_fp"
-            "announcement" -> "yunx/announcement"
-            else -> "yunx/$name"
+            "misc" -> "$prefix/misc"
+            "settings" -> "$prefix/settings"
+            "xunlei_fp" -> "$prefix/xunlei_fp"
+            "announcement" -> "$prefix/announcement"
+            else -> "$prefix/$name"
         }
         return DllPrefsStore(Preferences.userRoot().node(node))
     }

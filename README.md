@@ -9,7 +9,8 @@
 - 网盘：夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云 / 蓝奏云优享版
 - 视频：哔哩哔哩 / 小红书 / 抖音 / 微博 / 快手 / AcFun / Pixiv（DASH 自动合轨）
 - 下载：Range 分片并发 + SQLite 断点续传；磁力 / BT / ed2k 走外置引擎
-- 与原版数据完全互通：`~/.yunx-desktop/`（yunx.db / credential.key / 设置 / 账号）
+- 数据目录独立：`~/.yunx-wails/`（与原版 `~/.yunx-desktop/` 分家、可双开）；
+  首次启动询问「是否从原版导入数据」（`LegacyImport*` 服务方法，不自动导入）
 
 ## 目录结构
 
@@ -41,6 +42,22 @@ Windows：按 `dll/windows-dll-kit/README.md` 在真机编出 `yunxcore.dll` 放
 也可用 `YUNX_CORE_LIB` 显式指定库路径），其余步骤相同（网页登录 / 关机等平台能力已分文件适配）。
 
 服务方法增改后：`mise exec -- wails3 generate bindings -b` 重新生成绑定再构建。
+
+## 数据目录与原版数据导入
+
+- **默认数据目录 `~/.yunx-wails/`**（原版 Compose 版用 `~/.yunx-desktop/`）：数据库 `yunx.db`、
+  密钥 `credential.key`、`kv/`、`files/`（日志）都在这里；单实例锁 `instance.lock` 同目录
+  ⇒ 与原版**可双开互不影响**。
+- **首启导入**：首次启动检测到原版数据（`~/.yunx-desktop/yunx.db`）且本地尚无数据时，前端弹窗
+  询问是否导入（`LegacyImportStatus` / `LegacyImportDecide`，绝不自动导入）。导入拷贝
+  yunx.db(+wal/shm) / credential.key / kv/ / files/（单文件 >64MB 跳过）与原版设置
+  （`~/.java/.userPrefs/yunx` → `yunx-wails` 节点）；跳过 `cache/`（分片可重下）、
+  `diagnostic_logs/` 与锁文件。原版目录**只读**，导入后两边独立演化。
+- **prefs 节点独立**：设置存储（java.util.prefs）默认走 `yunx-wails` 节点（原版用 `yunx`）。
+- **隔离/调试环境变量**（两个应用形态共用同一核心，靠 env 分家）：
+  - `YUNX_DESKTOP_DATA_DIR`：数据目录（Go 壳启动时若未设置则默认 `~/.yunx-wails`）；
+  - `YUNX_PREFS_NODE`：prefs 节点前缀（默认 `yunx-wails`；设为 `yunx` 可与原版共享设置）；
+  - `YUNX_PREFS_USER_ROOT`：非空时整体搬移 java.util.prefs 根目录（native 冒烟/测试隔离用）。
 
 ## 调用约定（实测结论，务必遵守）
 

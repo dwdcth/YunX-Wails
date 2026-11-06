@@ -24,6 +24,11 @@ import (
 var assets embed.FS
 
 func main() {
+	// 数据目录独立（与 Compose 原版 ~/.yunx-desktop 分家）：env 未显式设置时默认 ~/.yunx-wails。
+	// 必须先于任何核心动作（单实例锁 / isolate 初始化都会摸数据目录）；
+	// 原版数据的首启导入由前端经 LegacyImport* 服务方法询问后执行（见 legacyimport.go）。
+	setDefaultDataDir()
+
 	// 单实例锁：双开会导致插件桥端口抢占与核心数据（KV/SQLite）并发写损坏
 	acquireInstanceLock()
 
@@ -86,8 +91,22 @@ func main() {
 	}
 }
 
+// setDefaultDataDir 数据目录默认值：进程启动最早处执行（先于单实例锁与任何核心初始化）。
+// YUNX_DESKTOP_DATA_DIR 显式设置时不动（沿用调用方指定的目录，测试/沙箱用）。
+func setDefaultDataDir() {
+	if os.Getenv("YUNX_DESKTOP_DATA_DIR") != "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return // 拿不到用户目录时留给核心自身默认，不阻断启动
+	}
+	_ = os.Setenv("YUNX_DESKTOP_DATA_DIR", filepath.Join(home, ".yunx-wails"))
+}
+
 // acquireInstanceLock 单实例锁：instance.lock 记录当前进程 PID，启动时先查旧 PID 是否存活。
-// 数据目录与核心 AppContext 同源：YUNX_DESKTOP_DATA_DIR 可覆盖，默认 ~/.yunx-desktop。
+// 数据目录与核心 AppContext 同源：YUNX_DESKTOP_DATA_DIR 可覆盖，默认 ~/.yunx-wails
+//（锁在独立目录里 ⇒ 与 Compose 原版可双开互不影响）。
 // 锁进程退出后不清理（崩溃残留视为陈旧锁：PID 已死则直接接管），探测逻辑在 processAlive。
 func acquireInstanceLock() {
 	base := os.Getenv("YUNX_DESKTOP_DATA_DIR")
@@ -96,7 +115,7 @@ func acquireInstanceLock() {
 		if err != nil {
 			return // 拿不到用户目录时放弃锁定，不阻断启动
 		}
-		base = filepath.Join(home, ".yunx-desktop")
+		base = filepath.Join(home, ".yunx-wails")
 	}
 	if err := os.MkdirAll(base, 0755); err != nil {
 		return

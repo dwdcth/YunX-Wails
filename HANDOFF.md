@@ -63,7 +63,7 @@
 
 | 接口 | 语义 | 核心默认 | 桌面实现（注册点：`DesktopHost.registerAll()`） |
 | --- | --- | --- | --- |
-| `KeyValueStore` + `HostStores.named(name)` | 键值存储（Preferences 的 9 方法子集） | `FileKeyValueStore`（`~/.yunx-desktop/kv/*.properties`） | `PrefsKeyValueStore`（节点名与拆分前一致：`yunx/misc`、`yunx/settings`、`yunx/xunlei_fp`、`yunx/announcement`，**用户数据零迁移**） |
+| `KeyValueStore` + `HostStores.named(name)` | 键值存储（Preferences 的 9 方法子集） | `FileKeyValueStore`（`<数据目录>/kv/*.properties`） | `PrefsKeyValueStore`（节点名与拆分前一致：`<前缀>/misc`、`<前缀>/settings`、`<前缀>/xunlei_fp`、`<前缀>/announcement`，**用户数据零迁移**。前缀＝`YUNX_PREFS_NODE` env，默认 `yunx-wails` ⇒ 本移植与原版 `yunx` 分家、可双开；另 `YUNX_PREFS_USER_ROOT` env 可整体搬移 prefs 根目录，供 native 冒烟隔离） |
 | `MachineProtector` | DPAPI 包裹/解包 + MachineGuid | 无（普通/严格档抛错，宽松档正常） | `JnaMachineProtector`（JNA；同时登记 ServiceLoader，单元测试无注册也能找到） |
 | `RegistryReader` | HKCU 注册表读（系统代理检测） | 全 null | `JnaRegistryReader` |
 | `HeadlessWebEngine` | 隐藏浏览器加载+JS 提取 | 返回 null | `JcefHeadlessWebEngine`（原 HeadlessWebView 全量逻辑） |
@@ -134,7 +134,14 @@
      「`runtime.LockOSThread` 专用协程 + channel 串行化」解决，**界面方不要绕过它直调核心库（现经 purego dlopen，约束不变）**。
 - `service.go`：`CoreService`（`Ping` / `Call` / `Version` / `ParseShare`），Wails 侧
   `application.NewService` 注册；界面方用 `wails3 generate bindings` 生成前端绑定调用。
-- `main.go`：Wails 3 启动骨架（窗口参数可改）。构建要求 **Go 1.26+ 与 Wails v3**
+  核心为**惰性初始化**（`ensureCore` + `sync.Once`）：`NewCoreService` 不再立即 `yunxcore.Open()`，
+  首个用到核心的调用才加载并执行宿主装配——给「首启先问原版数据导入」留窗口（见 `legacyimport.go`）。
+- `legacyimport.go`：原版数据导入（纯 Go，不碰核心）：`LegacyImportStatus` 探测 / `LegacyImportDecide`
+  执行或跳过；源 `~/.yunx-desktop`（**只读**），目标为当前数据目录。
+- `main.go`：Wails 3 启动骨架（窗口参数可改）。数据目录独立：启动最早处把
+  `YUNX_DESKTOP_DATA_DIR` 默认为 `~/.yunx-wails`（原版用 `~/.yunx-desktop`，⇒ 可双开）；
+  单实例锁 `instance.lock` 同在数据目录（原版锁文件名不同且分家目录，互不干扰）。
+  构建要求 **Go 1.26+ 与 Wails v3**
   （本沙箱 Go 1.23，未在此构建主程序；`yunxcore` + `cmd/yunx-call` 已实测调通）。
 - DLL 放置：`yunxcore/` 经 purego dlopen 运行时查找（$YUNX_CORE_LIB > exe 同目录 > exe ../dll/build/native > ./dll/build/native > 系统路径）。
 

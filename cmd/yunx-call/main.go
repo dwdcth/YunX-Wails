@@ -4,10 +4,12 @@
 //	go run ./cmd/yunx-call
 //
 // 环境变量 YUNX_DEBUG_CHECK=1 时追加「下载调试」扩展冒烟：
-// 开 downloadDebug → 对不存在的任务 id 查 download_debug_info（应优雅 ok:false，不崩）→ 还原开关。
+// 开 downloadDebug → 对不存在的任务 id 查 download_debug_info / 调 download_debug_preempt
+//（均应优雅 ok:false，不崩，preempt 有显式断言）→ 还原开关。
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -41,13 +43,14 @@ func main() {
 	fmt.Println("YUNX_CALL_DONE")
 }
 
-// 下载调试扩展冒烟：开关写入（含运行时联动）→ 不存在任务的 debug_info 优雅失败 → 还原开关。
+// 下载调试扩展冒烟：开关写入（含运行时联动）→ 不存在任务的 debug_info / debug_preempt 优雅失败 → 还原开关。
 func debugCheck(core *yunxcore.Core) {
 	fmt.Println("DEBUG_CHECK begin")
 	for _, req := range []string{
 		`{"cmd":"settings_set","key":"downloadDebug","value":"true"}`,
 		`{"cmd":"download_debug_info","taskId":999999}`,
 		`{"cmd":"download_debug_export","taskId":999999}`,
+		`{"cmd":"download_debug_preempt","taskId":999999,"key":"0-1048576"}`,
 		`{"cmd":"settings_set","key":"downloadDebug","value":"false"}`,
 	} {
 		resp, err := core.Call(req)
@@ -57,5 +60,20 @@ func debugCheck(core *yunxcore.Core) {
 		}
 		fmt.Printf("REQ %s\nRESP %s\n", req, resp)
 	}
+	// 断言：preempt 不存在的任务必须优雅 ok:false（不崩、带 error 说明）
+	preemptResp, err := core.Call(`{"cmd":"download_debug_preempt","taskId":999999,"key":"0-1048576"}`)
+	if err != nil {
+		fmt.Println("PREEMPT CALL ERR", err)
+		os.Exit(1)
+	}
+	var r struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(preemptResp), &r) != nil || r.OK || r.Error == "" {
+		fmt.Printf("PREEMPT 断言失败（应 ok:false + error）: %s\n", preemptResp)
+		os.Exit(1)
+	}
+	fmt.Println("PREEMPT 断言通过（不存在任务优雅 ok:false）")
 	fmt.Println("DEBUG_CHECK done")
 }

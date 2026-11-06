@@ -15,6 +15,7 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 /**
  * ApplyHostDefaults 启动装配：机器标识（显式配置 > 系统真值）、代理（正式设置的 proxyMode，默认 direct）、
  * ffmpeg（显式配置路径）。失败的项记日志不阻断启动。
+ * 在 ensureCore 里核心加载成功后被自动调用；也可在外部显式调用（幂等，重复注入无害）。
  * @returns {$CancellablePromise<void>}
  */
 export function ApplyHostDefaults() {
@@ -66,6 +67,30 @@ export function Call(requestJSON) {
  */
 export function HostStatus() {
     return $Call.ByID(2445487754);
+}
+
+/**
+ * LegacyImportDecide 用户决定后的执行入口（doImport=true 导入 / false 跳过）。
+ * 返回 JSON：{ok, imported, copied[], skippedFiles[], prefsCopied, prefsSkippedReason?, error?, partial?}。
+ * 拷贝中途失败：保留已拷贝文件、partial=true、不写决定标记（下次启动仍可询问/重试，
+ * 重试策略 = 覆盖同名文件继续拷）。
+ * @param {boolean} doImport
+ * @returns {$CancellablePromise<string>}
+ */
+export function LegacyImportDecide(doImport) {
+    return $Call.ByID(399477852, doImport);
+}
+
+/**
+ * LegacyImportStatus 首启探测：原版数据可否导入、是否已询问过。
+ * 返回 JSON：{available, asked, sourceDir, targetDir}。
+ *   - available：原版 ~/.yunx-desktop/yunx.db 存在 且 目标无 yunx.db 且 尚未做过决定
+ *     （.import-decided 标记不存在）。三个条件缺一不可：已决定过（导入/跳过）就不该再问。
+ *   - asked：目标目录存在 .import-decided 标记。
+ * @returns {$CancellablePromise<string>}
+ */
+export function LegacyImportStatus() {
+    return $Call.ByID(4237063014);
 }
 
 /**
