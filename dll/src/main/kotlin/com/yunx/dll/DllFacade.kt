@@ -158,6 +158,27 @@ object DllFacade {
         // 「储存目录」搬迁后旧位置残留清理（storage_migrate_db 记下的待清理标记在这里消费）。
         // 失败不阻断（目录不可写等场景核心仍能响应纯设置命令）。
         runCatching { AppContext.init() }
+        // 迅雷 access_token 过期自动刷新（对齐桌面 MainScreen:487）：401 时用 refresh_token
+        // 换新并落库。★ 之前 DLL 漏接这条线，导入的账号 token 一过期就「帐号认证失败」。
+        runCatching {
+            ResolveGateway.xunleiApi.refreshTokenProvider = { deviceId ->
+                kotlinx.coroutines.runBlocking {
+                    val acc = ResolveGateway.xunleiAccount.getAccount()
+                    if (acc == null || acc.refreshToken.isBlank()) null
+                    else ResolveGateway.xunleiApi.refreshToken(acc.refreshToken, deviceId, acc.authType)
+                        ?.also { (at, nrt) ->
+                            ResolveGateway.xunleiAccount.updateTokens(at, nrt)
+                            println("迅雷 token 已自动刷新（deviceId=${deviceId.take(8)}…）")
+                        }
+                }
+            }
+            // 迅雷网页账号 captcha 刷新（对齐桌面 MainScreen:495）：本地 9 盐签名优先，被拒回退网页会话
+            ResolveGateway.xunleiApi.webCaptchaRefresher = { deviceId, action ->
+                kotlinx.coroutines.runBlocking {
+                    ResolveGateway.xunleiAccount.refreshWebCaptcha(deviceId, action)
+                }
+            }
+        }
     }
 
     /** 下载引擎单例：首次使用时惰性构建（AppDatabase 单例 + 内置 ChunkDownloader，无外部引擎）。 */
