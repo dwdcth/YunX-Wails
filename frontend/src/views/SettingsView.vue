@@ -327,6 +327,79 @@ async function confirmMigrate() {
   }
 }
 
+// ---- 数据（数据目录展示 + 原版数据一次性导入；Go 宿主 LegacyImport*，纯文件操作不经核心）----
+
+interface LegacyStatus { available: boolean; asked: boolean; sourceDir: string; targetDir: string }
+const legacyStatus = ref<LegacyStatus | null>(null)
+const legacyBusy = ref(false)
+const legacyFlash = ref('')
+const legacyConfirm = ref<LegacyStatus | null>(null)
+
+/** 按钮旁的状态小字：可用 / 已决定（导入或跳过）/ 无源或目标已有数据 */
+const legacyNote = computed(() => {
+  const st = legacyStatus.value
+  if (!st) return '探测原版数据中…'
+  if (st.available) return `检测到原版数据（${st.sourceDir}），可导入`
+  if (st.asked) return '已完成导入或已选择跳过，不再重复导入'
+  return '未检测到可导入的原版数据（原版未使用过，或本应用数据目录已有数据）'
+})
+
+async function loadLegacy() {
+  try {
+    legacyStatus.value = JSON.parse(await CoreService.LegacyImportStatus())
+  } catch { legacyStatus.value = null }
+}
+
+function askLegacyImport() {
+  if (!legacyStatus.value?.available || legacyBusy.value) return
+  legacyConfirm.value = legacyStatus.value
+}
+
+/** 确认后执行导入：本会话核心可能已初始化（仍打开旧数据）→ 提示重启后生效 */
+async function confirmLegacyImport() {
+  const st = legacyConfirm.value
+  legacyConfirm.value = null
+  if (!st) return
+  legacyBusy.value = true
+  try {
+    const r = JSON.parse(await CoreService.LegacyImportDecide(true)) as { ok: boolean; error?: string }
+    legacyFlash.value = r.ok ? '已导入，重启应用后生效 ✓' : `导入失败：${r.error ?? '未知错误'}（可重试，覆盖同名文件续拷）`
+  } catch (e) {
+    legacyFlash.value = `导入失败：${e}`
+  } finally {
+    legacyBusy.value = false
+    loadLegacy() // 决定标记已落盘 → 按钮转禁用并更新状态说明
+  }
+}
+
+// ---- 下载调试开关（对齐原版 SettingsScreen：关闭会清空全部日志 → 先二次确认，取消回弹）----
+// 确认关闭时连带关掉「下载完整文件校验（SHA-256 全量）」：摘要只写调试日志，与原版联动一致。
+const debugOffConfirm = ref(false)
+
+function onDownloadDebugToggle() {
+  if (!s.value) return
+  if (s.value.downloadDebug) {
+    debugOffConfirm.value = true // 不直接改状态；取消 = 开关回弹
+  } else {
+    s.value.downloadDebug = true
+    save('downloadDebug', true)
+  }
+}
+
+async function confirmDebugOff() {
+  debugOffConfirm.value = false
+  if (!s.value) return
+  s.value.downloadDebug = false
+  await save('downloadDebug', false) // 核心侧「关闭即清空全部调试日志」
+  if (s.value.fullFileSha256) {
+    s.value.fullFileSha256 = false
+    await save('fullFileSha256', false)
+    done('下载调试已关闭，日志已清空；全量 SHA-256 已一并关闭')
+  } else {
+    done('下载调试已关闭，日志已清空')
+  }
+}
+
 // ---- 数据库加密等级（切档 = 重新包裹 credential.key，不碰库内数据、立即生效无需重启）----
 // 档位名/说明/后果提示照抄原版 DbEncryptionLevel 与 StorageDirectoryScreen 文案；
 // UI 展示**实际**档位（密钥文件里的封装格式），非偏好值。
@@ -418,7 +491,10 @@ async function saveFfmpeg(auto = false) {
   setTimeout(() => (hostFlash.value = ''), 2500)
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadLegacy() // 原版数据探测（纯 Go 文件检查，不影响设置加载）
+})
 </script>
 
 <template>
@@ -591,6 +667,23 @@ onMounted(load)
       </p>
     </div>
 
+    <!-- 数据：数据目录展示 + 原版数据一次性导入（决定标记落盘后按钮禁用并说明状态） -->
+    <div class="card">
+      <h3>数据</h3>
+      <p class="hint">本应用数据目录独立于原版 YunX-Desktop（两者可同时使用、互不影响）；目录跟随用户主目录，不可更改</p>
+      <div class="pathrow">
+        <span class="pathlabel">当前数据目录</span>
+        <code class="codepath">{{ legacyStatus?.targetDir ?? '读取中…' }}</code>
+      </div>
+      <div class="row" style="margin-top: 12px; justify-content: space-between; gap: 10px">
+        <span class="dim" style="font-size: 12.5px; min-width: 0">{{ legacyNote }}</span>
+        <button class="btn tonal small" style="flex: none" :disabled="!legacyStatus?.available || legacyBusy"
+                @click="askLegacyImport">{{ legacyBusy ? '导入中…' : '导入原版数据' }}</button>
+      </div>
+      <p v-if="legacyFlash" class="hint" style="margin: 8px 0 0">{{ legacyFlash }}</p>
+      <p class="hint" style="margin: 8px 0 0">导入内容：账号、下载记录、书签、解析历史、设置、密钥；导入不会修改原版数据。本会话若已初始化核心，导入后需重启应用才能读到导入的数据</p>
+    </div>
+
     <div v-if="s" class="card">
       <h3>网络</h3>
       <p class="hint">代理：探测在 Go 宿主，注入核心即时生效；三模式与原版一致，选择写入正式设置（HTTP/2 已移至「实验性功能」）</p>
@@ -747,8 +840,8 @@ onMounted(load)
             开启后新任务记录调试日志；关闭会清空日志（开启时下载页任务菜单出现「调试信息」入口）
           </span>
         </span>
-        <i class="switch" :class="{ on: s.downloadDebug }"
-           @click="s.downloadDebug = !s.downloadDebug; save('downloadDebug', s.downloadDebug)" />
+        <!-- 开→关先二次确认（关闭即清空全部日志，不可恢复）；取消则开关回弹 -->
+        <i class="switch" :class="{ on: s.downloadDebug }" @click="onDownloadDebugToggle" />
       </div>
       <p class="hint" style="margin: 10px 0 0">
         多账号下载与单文件多源分片开启前有二次风险确认；默认值：HTTP/2 关、读缓冲 64 KB、慢连接抢占开（12 KB/s · 15 秒）
@@ -774,6 +867,38 @@ onMounted(load)
     <div class="card">
       <h3>更多分组<span class="tag-m6">后续批次</span></h3>
       <p class="hint">Gopeed 引擎管理 —— 待后续批次接入</p>
+    </div>
+
+    <!-- 原版数据导入确认（设置页手动触发；成功后需重启才能读到导入的数据） -->
+    <div v-if="legacyConfirm" class="mask" @click.self="legacyConfirm = null">
+      <div class="dlg">
+        <h3>导入原版数据？</h3>
+        <p class="hint">
+          将把原版数据<br><code class="codepath">{{ legacyConfirm.sourceDir }}</code><br>导入到<br><code class="codepath">{{ legacyConfirm.targetDir }}</code><br><br>
+          导入内容：账号、下载记录、书签、解析历史、设置、密钥。建议先关闭原版应用；导入不会修改原版数据。<br><br>
+          本会话核心可能已初始化（仍打开旧数据）：导入完成后需重启应用才能读到导入的数据。
+        </p>
+        <div class="row end">
+          <button class="btn text small" :disabled="legacyBusy" @click="legacyConfirm = null">取消</button>
+          <button class="btn small" :disabled="legacyBusy" @click="confirmLegacyImport">
+            {{ legacyBusy ? '导入中…' : '开始导入' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 关闭「下载调试」二次确认（文案照原版 SettingsScreen：关闭会清空日志且不可恢复，全量 SHA-256 一并关） -->
+    <div v-if="debugOffConfirm" class="mask" @click.self="debugOffConfirm = false">
+      <div class="dlg">
+        <h3>关闭下载调试？</h3>
+        <p class="hint">
+          关闭后会清空已记录的全部下载调试日志，且无法恢复；「下载完整文件校验（SHA-256 全量）」也会被一并关闭（下次开启下载调试后需手动重新开启）。确定要关闭吗？
+        </p>
+        <div class="row end">
+          <button class="btn text small" @click="debugOffConfirm = false">取消</button>
+          <button class="btn small danger" @click="confirmDebugOff">关闭并清空</button>
+        </div>
+      </div>
     </div>
 
     <!-- 多账号下载 / 单文件多源分片：开启前二次风险确认（.mask/.dlg 对齐 DownloadView 弹窗，文案照原版 MultiAccountRisk 原文） -->
@@ -846,6 +971,7 @@ onMounted(load)
   width: min(420px, 92vw); border: 1px solid var(--outline-variant); }
 .dlg h3 { margin: 0 0 8px; font-size: 15px; }
 .dlg .hint { color: var(--on-bg-variant); font-size: 12.5px; margin: 0 0 14px; line-height: 1.7; }
+.btn.danger { background: var(--error); color: #fff; }
 .perthreads { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 10px; margin-top: 10px; padding-top: 12px; border-top: 1px dashed var(--outline-variant); }
 .trackers { font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace; font-size: 12.5px;

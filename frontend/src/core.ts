@@ -160,6 +160,12 @@ export function downloadDebugExport(taskId: number) {
     'download_debug_export', { taskId })
 }
 
+/** 手动强制重连某一路分片（调试弹窗分片行「重连」；任务/分片不在活跃集返回 ok:false） */
+export function downloadDebugPreempt(taskId: number, key: string) {
+  return call<{ ok: boolean; preempted?: string; error?: string }>(
+    'download_debug_preempt', { taskId, key })
+}
+
 // download_list 全量返回：tasks 之外带 stats（mergePercent>0 表示有任务处于 ffmpeg 合轨阶段）
 export interface DownloadStats {
   mergePercent: number

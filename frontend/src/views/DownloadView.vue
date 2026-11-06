@@ -7,9 +7,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   batchList, downloadDebugExport, downloadDebugInfo, downloadGetLink, downloadList,
-  downloadListFull, downloadPause, downloadPauseAll, downloadRedownload, downloadRemove,
-  downloadRemoveAll, downloadResume, downloadResumeAll, downloadSubmit, fmtBytes, fmtRemain,
-  fmtSpeed, settingsList, settingsSet, shutdownNow,
+  downloadListFull, downloadPause, downloadPauseAll, downloadDebugPreempt, downloadRedownload,
+  downloadRemove, downloadRemoveAll, downloadResume, downloadResumeAll, downloadSubmit,
+  fmtBytes, fmtRemain, fmtSpeed, settingsList, settingsSet, shutdownNow,
   type BatchTask, type DebugChunk, type DebugInfo, type DownloadStats, type DownloadTask,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
@@ -477,6 +477,32 @@ function openDebugDir() {
   }
 }
 
+/** 手动强制重连某路分片（对齐原版 ChunkRow「重连」）：掐断在飞连接、换新连接从已收字节续传；
+ *  成功行内提示并立即手动刷一次调试数据（不等 5 秒轮询），失败显示 error（分片已结束/不在活跃集） */
+const preemptNote = ref<{ key: string; msg: string; err: boolean } | null>(null)
+const preemptBusy = ref('')
+
+async function preemptChunk(c: DebugChunk) {
+  if (!debugTaskId.value || preemptBusy.value) return
+  preemptBusy.value = c.key
+  try {
+    const r = await downloadDebugPreempt(debugTaskId.value, c.key)
+    preemptNote.value = {
+      key: c.key,
+      msg: r.ok ? `已标记 ${c.key} 断开换连接续传` : (r.error ?? '该分片已结束，无法重连'),
+      err: !r.ok,
+    }
+    if (r.ok) pollDebug()
+  } catch (e) {
+    preemptNote.value = { key: c.key, msg: String(e), err: true }
+  } finally {
+    preemptBusy.value = ''
+    setTimeout(() => {
+      if (preemptNote.value?.key === c.key) preemptNote.value = null
+    }, 3000)
+  }
+}
+
 onMounted(() => {
   refresh()
   timer = window.setInterval(refresh, 800)
@@ -714,16 +740,28 @@ onUnmounted(() => {
               <div class="hint">{{ debugWorkerSummary }}</div>
               <div class="dbgchunks">
                 <div v-for="c in debugInfo.chunks" :key="c.key" class="dbgchunk" :class="{ stuck: debugStuck(c) }">
-                  <div style="font-weight: 600; font-size: 12.5px">{{ c.key }}　worker #{{ c.worker }}</div>
-                  <div class="hint">区间 {{ c.start }}-{{ c.start + c.size - 1 }} · 已收
-                    {{ fmtBytes(c.received) }}/{{ fmtBytes(c.size) }}（{{ debugChunkPct(c) }}%）</div>
-                  <div class="hint" :class="{ errtext: debugStuck(c) }">
-                    瞬时 {{ debugChunkSpeed(c) }} · 已跑 {{ Math.floor(c.elapsedMs / 1000) }}s
-                    <span v-if="c.idleMs >= 1000"> · 已 {{ Math.floor(c.idleMs / 1000) }}s 无数据</span>
-                    <span v-if="c.preemptCount > 0"> · 已抢占 {{ c.preemptCount }} 次</span>
-                    <span v-if="c.preempting"> · 待换连接</span>
-                    <span v-if="debugStuck(c)"> · 疑似卡死</span>
+                  <div class="dbgchunk-main">
+                    <div style="font-weight: 600; font-size: 12.5px">{{ c.key }}　worker #{{ c.worker }}</div>
+                    <div class="hint">区间 {{ c.start }}-{{ c.start + c.size - 1 }} · 已收
+                      {{ fmtBytes(c.received) }}/{{ fmtBytes(c.size) }}（{{ debugChunkPct(c) }}%）</div>
+                    <div class="hint" :class="{ errtext: debugStuck(c) }">
+                      瞬时 {{ debugChunkSpeed(c) }} · 已跑 {{ Math.floor(c.elapsedMs / 1000) }}s
+                      <span v-if="c.idleMs >= 1000"> · 已 {{ Math.floor(c.idleMs / 1000) }}s 无数据</span>
+                      <span v-if="c.preemptCount > 0"> · 已抢占 {{ c.preemptCount }} 次</span>
+                      <span v-if="c.preempting"> · 待换连接</span>
+                      <span v-if="debugStuck(c)"> · 疑似卡死</span>
+                    </div>
+                    <div v-if="preemptNote && preemptNote.key === c.key" class="hint"
+                         :class="{ errtext: preemptNote.err }" style="margin-top: 3px">
+                      {{ preemptNote.msg }}
+                    </div>
                   </div>
+                  <!-- 手动强制重连：掐断当前连接、换新连接从已收字节续传（原版 ChunkRow 同款「重连」） -->
+                  <button class="btn text small dbgpreempt" :disabled="preemptBusy === c.key"
+                          title="掐断该分片当前连接，换新连接从已收字节续传"
+                          @click="preemptChunk(c)">
+                    {{ preemptBusy === c.key ? '重连中…' : '重连' }}
+                  </button>
                 </div>
               </div>
             </div>
@@ -808,8 +846,11 @@ onUnmounted(() => {
 .dbginforow .k { color: var(--on-bg-variant); width: 60px; flex: none; }
 .dbgchunks { overflow-y: auto; flex: 1; min-height: 0; display: flex; flex-direction: column;
   gap: 8px; padding: 6px 1px 8px; }
-.dbgchunk { background: var(--surface-container); border-radius: 10px; padding: 8px 12px; flex: none; }
+.dbgchunk { background: var(--surface-container); border-radius: 10px; padding: 8px 12px; flex: none;
+  display: flex; align-items: center; gap: 8px; }
 .dbgchunk.stuck { border: 1px solid var(--error); }
+.dbgchunk-main { flex: 1; min-width: 0; }
+.dbgpreempt { flex: none; }
 .dbgchunk .hint { margin: 2px 0 0; }
 .errtext { color: var(--error) !important; }
 .dbglogs { flex: 1; min-height: 0; overflow-y: auto; margin-top: 6px;
