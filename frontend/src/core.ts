@@ -63,7 +63,7 @@ export async function downloadList(): Promise<DownloadTask[]> {
 }
 
 export async function downloadSubmit(url: string, fileName: string, saveDir = '') {
-  return call<{ ok: boolean; taskId: number }>('download_submit', { url, fileName, saveDir })
+  return call<{ ok: boolean; taskId?: number; error?: string }>('download_submit', { url, fileName, saveDir })
 }
 
 export function downloadPause(taskId: number) {
@@ -347,7 +347,7 @@ export async function settingsList(): Promise<AppSettings | null> {
 }
 
 export async function settingsSet(key: string, value: string | number | boolean) {
-  return call<{ ok: boolean }>('settings_set', { key, value: String(value) })
+  return call<{ ok: boolean; error?: string }>('settings_set', { key, value: String(value) })
 }
 
 /** 带平台维度的设置写入（如按平台线程数：key 固定 downloadThreadsFor，platform 字段区分平台） */
@@ -467,7 +467,7 @@ export function cloudShare(platform: string, fids: string[], title = '', passcod
 }
 
 export async function shareDownload(f: ShareFile, saveDir = '') {
-  return call<{ ok: boolean; error?: string; taskId: number; filename: string }>('share_download', {
+  return call<{ ok: boolean; error?: string; taskId?: number; filename?: string }>('share_download', {
     fid: f.fid, fname: f.fname, fsize: f.fsize, fidToken: f.fidToken, saveDir,
   })
 }
@@ -553,7 +553,7 @@ export async function cloudQuota(): Promise<Record<string, CloudQuota | null>> {
 
 /** 个人盘直链下载（夸克/UC/蓝奏）→ 入队 */
 export function cloudDownload(platform: string, f: ShareFile, saveDir = '') {
-  return call<{ ok: boolean; error?: string; taskId: number }>('cloud_download', {
+  return call<{ ok: boolean; error?: string; taskId?: number }>('cloud_download', {
     platform, fid: f.fid, fname: f.fname, fsize: f.fsize, fidToken: f.fidToken, saveDir,
   })
 }

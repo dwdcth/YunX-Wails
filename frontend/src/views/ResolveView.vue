@@ -383,7 +383,7 @@ async function openDir(f: ShareFile) {
   try {
     const r = await shareList(f.fid)
     if (r.ok && r.files) {
-      detail.value.files = r.files
+      if (detail.value) detail.value.files = r.files
       dirStack.value.push({ fid: f.fid, name: f.fname })
     } else {
       error.value = r.error ?? '进入目录失败'
@@ -404,7 +404,7 @@ async function backTo(level: number) {
     const target = dirStack.value[level]
     const r = await shareList(target.fid)
     if (r.ok && r.files) {
-      detail.value.files = r.files
+      if (detail.value) detail.value.files = r.files
       dirStack.value = dirStack.value.slice(0, level + 1)
     }
   } finally {

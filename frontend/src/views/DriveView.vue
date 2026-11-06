@@ -102,7 +102,7 @@ async function refreshQuota() {
   try { quotas.value = await cloudQuota() } catch { /* 配额失败不打扰 */ }
 }
 
-async function act(fn: () => Promise<unknown>) {
+async function act(fn: () => unknown) {
   try { await fn() } catch (e) { error.value = String(e) }
   await refresh()
 }
@@ -159,7 +159,7 @@ function backTo(level: number) {
 async function doMkdir() {
   if (!browsing.value || !mkdirName.value.trim()) return
   const r = await cloudMkdir(browsing.value, mkdirName.value.trim())
-      .catch((e) => ({ ok: false, error: String(e) }))
+      .catch((e): { ok: boolean; error: string; shareUrl?: string } => ({ ok: false, error: String(e) }))
   if (r.ok) {
     showMkdir.value = false
     mkdirName.value = ''
@@ -183,7 +183,7 @@ async function doShare() {
   sharing.value = true
   const r = await cloudShare(browsing.value, selFiles.value.map((f) => f.fid),
                              shareTitle.value.trim(), sharePass.value.trim(), shareExpire.value)
-      .catch((e) => ({ ok: false, error: String(e) }))
+      .catch((e): { ok: boolean; error: string; shareUrl?: string } => ({ ok: false, error: String(e) }))
   sharing.value = false
   if (r.ok && r.shareUrl) {
     // 复制失败（如非安全上下文）只影响剪贴板，链接仍展示在 toast
@@ -202,7 +202,7 @@ async function doShare() {
 async function doRename() {
   if (!browsing.value || !renaming.value) return
   const r = await cloudRename(browsing.value, renaming.value, renameText.value.trim())
-      .catch((e) => ({ ok: false, error: String(e) }))
+      .catch((e): { ok: boolean; error: string; shareUrl?: string } => ({ ok: false, error: String(e) }))
   if (r.ok) {
     renaming.value = null
     await reloadCurrent()
@@ -215,7 +215,7 @@ async function doRename() {
 async function doDelete(f: ShareFile) {
   if (!browsing.value) return
   if (!confirm(`删除「${f.fname}」？`)) return
-  const r = await cloudDelete(browsing.value, [f]).catch((e) => ({ ok: false, error: String(e) }))
+  const r = await cloudDelete(browsing.value, [f]).catch((e): { ok: boolean; error: string; shareUrl?: string } => ({ ok: false, error: String(e) }))
   if (r.ok) {
     await reloadCurrent()
     flash('已删除')
@@ -226,7 +226,7 @@ async function doDelete(f: ShareFile) {
 
 async function doDownload(f: ShareFile) {
   if (!browsing.value) return
-  const r = await cloudDownload(browsing.value, f).catch((e) => ({ ok: false, error: String(e) }))
+  const r = await cloudDownload(browsing.value, f).catch((e): { ok: boolean; error: string; taskId?: number } => ({ ok: false, error: String(e) }))
   if (r.ok) {
     flash(`「${f.fname}」已加入下载（任务 #${r.taskId}）`)
   } else {
@@ -237,7 +237,7 @@ async function doDownload(f: ShareFile) {
 async function doMove(targetFid: string, targetPath: string) {
   if (!browsing.value || !moving.value) return
   const r = await cloudMove(browsing.value, [moving.value], targetFid, targetPath)
-      .catch((e) => ({ ok: false, error: String(e) }))
+      .catch((e): { ok: boolean; error: string; shareUrl?: string } => ({ ok: false, error: String(e) }))
   moving.value = null
   if (r.ok) {
     await reloadCurrent()
@@ -375,7 +375,7 @@ onMounted(() => {
                 <input class="input" style="flex: 1; font-size: 13px" v-model="remarkDraft" placeholder="主账号备注" />
                 <button class="btn tonal small" @click="act(() => {
                   const primary = byPlatform.get(p.key)?.find(a => a.isPrimary)
-                  if (primary) accountSetRemark(p.key, primary.id, remarkDraft.value.trim())
+                  if (primary) accountSetRemark(p.key, primary.id, remarkDraft.trim())
                 })">保存备注</button>
               </div>
             </div>

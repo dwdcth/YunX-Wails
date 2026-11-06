@@ -313,12 +313,12 @@ async function redownload(row: MergedRow) {
 
 function openFile(row: MergedRow) {
   menuFor.value = ''
-  if (row.savePath) CoreService.OpenFile(row.savePath).catch((e) => console.warn('打开失败:', e))
+  if (row.savePath) CoreService.OpenFile(row.savePath).catch(() => console.warn('打开失败'))
 }
 
 function openDirectory(row: MergedRow) {
   menuFor.value = ''
-  if (row.savePath) CoreService.OpenDirectory(row.savePath).catch((e) => console.warn('打开目录失败:', e))
+  if (row.savePath) CoreService.OpenDirectory(row.savePath).catch(() => console.warn('打开目录失败'))
 }
 
 // 点击菜单外区域收起行菜单
@@ -606,7 +606,7 @@ async function exportDebugLogs() {
 
 function openDebugDir() {
   if (debugExportPath.value) {
-    CoreService.OpenDirectory(debugExportPath.value).catch((e) => console.warn('打开目录失败:', e))
+    CoreService.OpenDirectory(debugExportPath.value).catch(() => console.warn('打开目录失败'))
   }
 }
 
