@@ -353,6 +353,10 @@ object DllFacade {
                             .put("quarkNoSaveDownload", s.quarkNoSaveDownload)
                             .put("multiAccountDownload", s.multiAccountDownload)
                             .put("multiSourceDownload", s.multiSourceDownload)
+                            .put("downloadBufferSize", s.downloadBufferSize)
+                            .put("slowPreemptEnabled", s.slowPreemptEnabled)
+                            .put("slowPreemptMinBps", s.slowPreemptMinBps)
+                            .put("slowPreemptMinAgeMs", s.slowPreemptMinAgeMs)
                             .put("previewEngine", s.previewEngine)
                             .put("diagnosticMode", s.diagnosticMode)
                             .put("downloadDebug", s.downloadDebug)
@@ -396,7 +400,11 @@ object DllFacade {
                         "btTrackers" -> s.btTrackers = value
                         "quarkNoSaveDownload" -> s.quarkNoSaveDownload = value.toBoolean()
                         "multiAccountDownload" -> s.multiAccountDownload = value.toBoolean()
-                        "multiSourceDownload" -> s.multiAccountDownload = value.toBoolean()
+                        "multiSourceDownload" -> s.multiSourceDownload = value.toBoolean()
+                        "downloadBufferSize" -> s.downloadBufferSize = value.toInt()
+                        "slowPreemptEnabled" -> s.slowPreemptEnabled = value.toBoolean()
+                        "slowPreemptMinBps" -> s.slowPreemptMinBps = value.toLong()
+                        "slowPreemptMinAgeMs" -> s.slowPreemptMinAgeMs = value.toLong()
                         "previewEngine" -> s.previewEngine = value
                         "diagnosticMode" -> s.diagnosticMode = value.toBoolean()
                         "downloadDebug" -> s.downloadDebug = value.toBoolean()

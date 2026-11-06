@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 设置页：全部经核心 settings_list/settings_set 读写**正式设置**（yunx/settings，
 // 与 Compose 原版 / Linux 移植版同一份数据）；代理与 ffmpeg 由 Go 宿主探测/注入。
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
 import { githubMirrorRefresh, kvPut, settingsList, settingsSet, settingsSetPlatform, updateCheck,
@@ -103,7 +103,19 @@ async function onTheme(modeIdx: 0 | 1 | 2) {
 
 // ---- 主题取色器（自定义种子色：themeColorMode=1 + themeSeedColor 十进制）----
 
-const PRESET_SEEDS = ['#415F91', '#1565C0', '#00897B', '#2E7D32', '#6750A4', '#AD1457', '#BF360C', '#455A64']
+// 预置主题色：照原版 ThemeScreen presetColors（ARGB long 去掉 alpha 位 → #rrggbb，如 0xFF415F91 → #415F91）
+const PRESET_COLORS = [
+  { name: '蓝色', hex: '#415F91' },
+  { name: '靛蓝', hex: '#3F51B5' },
+  { name: '紫色', hex: '#6750A4' },
+  { name: '玫红', hex: '#C2185B' },
+  { name: '红色', hex: '#B3261E' },
+  { name: '橙色', hex: '#F4631C' },
+  { name: '金黄', hex: '#F9A825' },
+  { name: '绿色', hex: '#38761D' },
+  { name: '青色', hex: '#00897B' },
+  { name: '天蓝', hex: '#0288D1' },
+]
 const pickedSeed = ref<string>(cachedSeedColor() ?? '#415F91')
 
 async function pickSeed(hex: string) {
@@ -119,6 +131,103 @@ async function pickSeed(hex: string) {
 function onColorInput(e: Event) {
   const hex = (e.target as HTMLInputElement).value
   if (/^#[0-9a-fA-F]{6}$/.test(hex)) pickSeed(hex)
+}
+
+// ---- 实验性功能（对齐原版 ExperimentalFeaturesScreen；键名 = SettingsRepository 属性名）----
+// 数值项按原版「合理范围」钳制：读缓冲 16–1024 KB、慢连接阈值 4–1024 KB/s、慢连接时长 5–120 秒。
+// 核心存原始单位：downloadBufferSize 字节 / slowPreemptMinBps 字节每秒 / slowPreemptMinAgeMs 毫秒。
+const BUFFER_KB = { min: 16, max: 1024, def: 64 }
+const PREEMPT_KBPS = { min: 4, max: 1024, def: 12 }
+const PREEMPT_SEC = { min: 5, max: 120, def: 15 }
+
+const expTuning = ref({ bufferKb: BUFFER_KB.def, preemptKbps: PREEMPT_KBPS.def, preemptSec: PREEMPT_SEC.def })
+const preemptEnabled = ref(true) // 慢连接抢占开关（核心默认开）
+
+function clampInt(v: number, lo: number, hi: number, fallback: number): number {
+  const n = Math.floor(Number(v))
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback
+}
+
+async function saveBufferKb() {
+  expTuning.value.bufferKb = clampInt(expTuning.value.bufferKb, BUFFER_KB.min, BUFFER_KB.max, BUFFER_KB.def)
+  await save('downloadBufferSize', expTuning.value.bufferKb * 1024)
+}
+
+async function savePreemptKbps() {
+  expTuning.value.preemptKbps =
+    clampInt(expTuning.value.preemptKbps, PREEMPT_KBPS.min, PREEMPT_KBPS.max, PREEMPT_KBPS.def)
+  await save('slowPreemptMinBps', expTuning.value.preemptKbps * 1024)
+}
+
+async function savePreemptSec() {
+  expTuning.value.preemptSec = clampInt(expTuning.value.preemptSec, PREEMPT_SEC.min, PREEMPT_SEC.max, PREEMPT_SEC.def)
+  await save('slowPreemptMinAgeMs', expTuning.value.preemptSec * 1000)
+}
+
+async function togglePreempt() {
+  preemptEnabled.value = !preemptEnabled.value
+  await save('slowPreemptEnabled', preemptEnabled.value)
+}
+
+// 多账号下载（C1）/ 单文件多源分片（C2，依赖 C1）：开启前二次风险确认（文案照原版 MultiAccountRisk 枚举原文）
+type RiskKind = 'multiAccount' | 'multiSource'
+const RISK_TEXT: Record<RiskKind, { title: string; message: string }> = {
+  multiAccount: {
+    title: '开启「多账号下载」？',
+    message: '请只登录你自己的账号。同一网络下频繁切换多个账号取链，部分网盘（尤其百度、夸克）' +
+      '可能触发风控：出现验证码、临时限流，甚至短期限制账号下载。功能仍在实验阶段，' +
+      '遇到异常可随时关闭。',
+  },
+  multiSource: {
+    title: '开启「单文件多源分片」？',
+    message: '同一个文件会被多个账号同时拉取，比多账号下载更容易触发风控；可能出现分片失败率上升、' +
+      '下载变慢或账号被临时限制。目前只支持夸克 / UC / 迅雷。功能仍在实验阶段，' +
+      '请自行评估风险。',
+  },
+}
+const pendingRisk = ref<RiskKind | null>(null)
+const pendingRiskText = computed(() => (pendingRisk.value ? RISK_TEXT[pendingRisk.value] : null))
+// C2 读取口径 = C1 且 C2 都开（对齐原版 multiSourceActive()，避免「C1 关着、C2 还显示开启」的错觉）
+const multiSourceActive = computed(() => !!s.value?.multiAccountDownload && !!s.value?.multiSourceDownload)
+
+async function onMultiAccountToggle() {
+  if (!s.value) return
+  if (s.value.multiAccountDownload) {
+    // 关闭 C1 直接生效（无需确认），且按原版口径连带关掉 C2（C2 依赖 C1）
+    s.value.multiAccountDownload = false
+    const c2WasOn = s.value.multiSourceDownload
+    s.value.multiSourceDownload = false
+    await save('multiAccountDownload', false)
+    if (c2WasOn) {
+      await save('multiSourceDownload', false)
+      done('已关闭多账号下载，单文件多源分片同步关闭')
+    }
+  } else {
+    pendingRisk.value = 'multiAccount' // 开启前二次确认；取消则什么都不写
+  }
+}
+
+function onMultiSourceToggle() {
+  if (!s.value || !s.value.multiAccountDownload) return // C1 未开时 C2 不可操作
+  if (s.value.multiSourceDownload) {
+    s.value.multiSourceDownload = false // 关闭不需要确认
+    save('multiSourceDownload', false)
+  } else {
+    pendingRisk.value = 'multiSource'
+  }
+}
+
+async function confirmRisk() {
+  const kind = pendingRisk.value
+  pendingRisk.value = null
+  if (!kind || !s.value) return
+  if (kind === 'multiAccount') {
+    s.value.multiAccountDownload = true
+    await save('multiAccountDownload', true)
+  } else {
+    s.value.multiSourceDownload = true
+    await save('multiSourceDownload', true)
+  }
 }
 
 // ---- GitHub 下载加速（自定义镜像前缀 + 触发测速）----
@@ -158,6 +267,15 @@ async function load() {
     if (s.value && s.value.themeColorMode === 1 && s.value.themeSeedColor > 0) {
       pickedSeed.value = seedNumToHex(s.value.themeSeedColor)
     }
+    // 实验性调优项回显：settings_list 暂未回传这四项，读不到时按核心默认值展示
+    const ex = (s.value ?? {}) as unknown as Record<string, unknown>
+    expTuning.value.bufferKb = clampInt(Math.round(Number(ex.downloadBufferSize ?? 65536) / 1024),
+      BUFFER_KB.min, BUFFER_KB.max, BUFFER_KB.def)
+    preemptEnabled.value = typeof ex.slowPreemptEnabled === 'boolean' ? ex.slowPreemptEnabled : true
+    expTuning.value.preemptKbps = clampInt(Math.round(Number(ex.slowPreemptMinBps ?? 12288) / 1024),
+      PREEMPT_KBPS.min, PREEMPT_KBPS.max, PREEMPT_KBPS.def)
+    expTuning.value.preemptSec = clampInt(Math.round(Number(ex.slowPreemptMinAgeMs ?? 15000) / 1000),
+      PREEMPT_SEC.min, PREEMPT_SEC.max, PREEMPT_SEC.def)
     mirrorPrefix.value = s.value?.githubMirrorPrefix ?? ''
   } catch (e) {
     loadError.value = String(e)
@@ -215,8 +333,8 @@ onMounted(load)
       </div>
       <div class="row" style="margin-top: 14px; gap: 10px">
         <span style="font-size: 13px; color: var(--on-bg-variant)">主题色</span>
-        <button v-for="c in PRESET_SEEDS" :key="c" class="swatch" :class="{ picked: pickedSeed === c }"
-                :style="{ background: c }" :title="c" @click="pickSeed(c)" />
+        <button v-for="c in PRESET_COLORS" :key="c.hex" class="swatch" :class="{ picked: pickedSeed === c.hex }"
+                :style="{ background: c.hex }" :title="`${c.name} ${c.hex}`" @click="pickSeed(c.hex)" />
         <input type="color" class="colorpick" :value="pickedSeed" title="自定义主题色"
                @input="onColorInput" />
       </div>
@@ -294,12 +412,7 @@ onMounted(load)
 
     <div v-if="s" class="card">
       <h3>网络</h3>
-      <div class="row" style="margin-bottom: 12px">
-        <span style="flex: 1">HTTP/2</span>
-        <i class="switch" :class="{ on: s.http2Enabled }"
-           @click="s.http2Enabled = !s.http2Enabled; save('http2Enabled', s.http2Enabled)" />
-      </div>
-      <p class="hint">代理：探测在 Go 宿主，注入核心即时生效；三模式与原版一致，选择写入正式设置</p>
+      <p class="hint">代理：探测在 Go 宿主，注入核心即时生效；三模式与原版一致，选择写入正式设置（HTTP/2 已移至「实验性功能」）</p>
       <div class="row" style="margin-bottom: 12px">
         <div class="seg">
           <button :class="{ active: s.proxyMode === 'direct' }" @click="s.proxyMode = 'direct'">直连</button>
@@ -402,22 +515,54 @@ onMounted(load)
 
     <div v-if="s" class="card">
       <h3>实验性功能</h3>
-      <p class="hint">以下能力仍在验证阶段，默认关闭；开启后行为可能随核心更新调整</p>
+      <p class="hint">以下参数影响下载行为，改动后对新任务生效（慢连接抢占在下一采样周期生效）；实验性开关默认关闭</p>
       <div class="row">
-        <span style="flex: 1">多账号轮换下载（同平台多账号轮流取直链）</span>
-        <i class="switch" :class="{ on: s.multiAccountDownload }"
-           @click="s.multiAccountDownload = !s.multiAccountDownload; save('multiAccountDownload', s.multiAccountDownload)" />
+        <span style="flex: 1">启用 HTTP/2（默认仅 HTTP/1.1；理论上更快，实测差异通常不大）</span>
+        <i class="switch" :class="{ on: s.http2Enabled }"
+           @click="s.http2Enabled = !s.http2Enabled; save('http2Enabled', s.http2Enabled)" />
+      </div>
+      <div class="row" style="margin-top: 14px; margin-bottom: 12px">
+        <div class="field" style="flex: 1; min-width: 150px">
+          <label>下载读缓冲大小 KB（16-1024，默认 64）</label>
+          <input class="input" type="number" min="16" max="1024" v-model.number="expTuning.bufferKb"
+                 @change="saveBufferKb" />
+        </div>
+        <div class="field" style="flex: 1; min-width: 150px">
+          <label>慢连接判定阈值 KB/s（4-1024，默认 12）</label>
+          <input class="input" type="number" min="4" max="1024" v-model.number="expTuning.preemptKbps"
+                 @change="savePreemptKbps" />
+        </div>
+        <div class="field" style="flex: 1; min-width: 150px">
+          <label>慢连接判定时长 秒（5-120，默认 15）</label>
+          <input class="input" type="number" min="5" max="120" v-model.number="expTuning.preemptSec"
+                 @change="savePreemptSec" />
+        </div>
+      </div>
+      <div class="row">
+        <span style="flex: 1">慢连接抢占（把远低于同伴的慢分片换新连接续传，默认开）</span>
+        <i class="switch" :class="{ on: preemptEnabled }" @click="togglePreempt" />
       </div>
       <div class="row" style="margin-top: 10px">
-        <span style="flex: 1">多源下载（同一文件聚合多镜像源加速）</span>
-        <i class="switch" :class="{ on: s.multiSourceDownload }"
-           @click="s.multiSourceDownload = !s.multiSourceDownload; save('multiSourceDownload', s.multiSourceDownload)" />
+        <span style="flex: 1">多账号下载（实验性）：批量下载按文件轮换不同账号取链，每个文件仍只用一个账号</span>
+        <i class="switch" :class="{ on: s.multiAccountDownload }" @click="onMultiAccountToggle" />
+      </div>
+      <div class="row" style="margin-top: 10px">
+        <span class="dim" style="flex: 1">
+          {{ s.multiAccountDownload
+              ? '单文件多源分片（实验性）：同一文件多账号各取直链、分片轮流下载，目前只支持夸克 / UC / 迅雷'
+              : '单文件多源分片（实验性）：需先开启「多账号下载」' }}
+        </span>
+        <i class="switch" :class="{ on: multiSourceActive, disabled: !s.multiAccountDownload }"
+           @click="onMultiSourceToggle" />
       </div>
       <div class="row" style="margin-top: 10px">
         <span style="flex: 1">下载完整文件校验（SHA-256 全量）</span>
         <i class="switch" :class="{ on: s.fullFileSha256 }"
            @click="s.fullFileSha256 = !s.fullFileSha256; save('fullFileSha256', s.fullFileSha256)" />
       </div>
+      <p class="hint" style="margin: 10px 0 0">
+        多账号下载与单文件多源分片开启前有二次风险确认；默认值：HTTP/2 关、读缓冲 64 KB、慢连接抢占开（12 KB/s · 15 秒）
+      </p>
     </div>
 
     <div v-if="s" class="card">
@@ -441,6 +586,18 @@ onMounted(load)
       <p class="hint">储存目录迁移 / 数据库加密档位 / Gopeed 引擎管理 —— 待后续批次接入</p>
     </div>
 
+    <!-- 多账号下载 / 单文件多源分片：开启前二次风险确认（.mask/.dlg 对齐 DownloadView 弹窗，文案照原版 MultiAccountRisk 原文） -->
+    <div v-if="pendingRiskText" class="mask" @click.self="pendingRisk = null">
+      <div class="dlg">
+        <h3>{{ pendingRiskText.title }}</h3>
+        <p class="hint">{{ pendingRiskText.message }}</p>
+        <div class="row end">
+          <button class="btn text small" @click="pendingRisk = null">取消</button>
+          <button class="btn small" @click="confirmRisk">确认开启</button>
+        </div>
+      </div>
+    </div>
+
     <div class="row end">
       <button class="btn text small" @click="router.push('/about')">关于 YunX</button>
     </div>
@@ -452,6 +609,15 @@ onMounted(load)
   cursor: pointer; padding: 0; flex: none; }
 .swatch.picked { border-color: var(--on-bg); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--on-bg); }
 .colorpick { width: 30px; height: 30px; padding: 2px; border: none; background: none; cursor: pointer; flex: none; }
+.switch.disabled { opacity: 0.45; cursor: not-allowed; }
+.dim { color: var(--on-bg-variant); }
+/* 风险确认弹窗（.mask/.dlg 对齐 DownloadView / DirPickerModal 约定） */
+.mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.42); display: flex;
+  align-items: center; justify-content: center; z-index: 40; }
+.dlg { background: var(--surface); border-radius: var(--radius-lg); padding: 18px 20px;
+  width: min(420px, 92vw); border: 1px solid var(--outline-variant); }
+.dlg h3 { margin: 0 0 8px; font-size: 15px; }
+.dlg .hint { color: var(--on-bg-variant); font-size: 12.5px; margin: 0 0 14px; line-height: 1.7; }
 .perthreads { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 10px; margin-top: 10px; padding-top: 12px; border-top: 1px dashed var(--outline-variant); }
 .trackers { font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace; font-size: 12.5px;
