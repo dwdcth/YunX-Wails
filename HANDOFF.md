@@ -123,6 +123,25 @@
    跑冒烟收集元数据再构建，不要手写猜测配置；
 5. 用 `dll/go-loader` 或 `cmd/yunx-call` 复验。
 
+### 5.4 命令面增补（截至 2026-11-07，权威清单以 DllFacade.kt 的 when 分支为准）
+
+上表是 M1 基线；此后命令面已扩至 70+，按族归纳：
+
+| 族 | 命令 | 说明 |
+| --- | --- | --- |
+| 设置 | `settings_list` / `settings_set` | 全键读写；调优类即时联动（HttpClients/DownloadTuning/DiagnosticLog/downloadDebug 日志开关） |
+| 账号 | `accounts_list`、`account_set_primary/remark/remove`、`account_login_cookie/password` | 10 平台统一 |
+| 解析/网盘 | `share_resolve/list/download/link`、`share_transfer(_batch)`、`share_folder_download`、`batch_list` | 批量转存整批空间预算+skipSpaceCheck；文件夹递归下载带 C1 凭证轮换 |
+| 云盘 | `cloud_list/mkdir/rename/move/delete/quota/download/share` | 10 平台 |
+| 下载 | `download_submit/list/pause/resume/remove(+_all)/redownload/get_link`、`download_debug_info/export/preempt` | 调试页三命令（设置开 downloadDebug 后行菜单入口） |
+| 视频 | `video_parse(_quality)`、`video_download`、`video_accounts_list/login_cookie` | DASH 合轨/三模式 |
+| 历史/书签 | `link_history_*`、`bookmark_*` | 解析历史（share_resolve 自动记录） |
+| 公告/更新 | `announcements_list`（缓存+后台刷新，绝不同步走网络）、`announcement_*`、`update_check`、`github_*`、`misc xunlei_fp` | |
+| 储存/安全 | `auth_export/import`、`storage_migrate_db`、`storage_apply_encryption`、`key_roundtrip` | 加密类命令在真实目录上属最高危（密钥重包裹），只在 /tmp 隔离演练 |
+
+**Go 侧服务**（bindings 直调，不走 JSON 命令面）：`NormalDownload_*`（普通下载 10 方法）、`Aria2Status/ApplyOptions`、`LegacyImportStatus/Decide`（首启导入，Go 侧「导入决定闸门」保证核心惰性初始化发生在决定之后）、`HostStatus/SetProxy/SetFfmpeg`、`OpenFile/OpenDirectory/Shutdown`、`PickDirectory`（无）。
+普通下载引擎架构（aria2-next + 内置 FTP + 独立 downloads.db）见 README「普通下载引擎」一节与 `downloadd/` 包头注。
+
 ## 6. Go 侧（仓库根）
 
 - `yunxcore/yunxcore.go`：DLL 的进程级封装（单例）。**两条硬约束（都有实测证据）**：
