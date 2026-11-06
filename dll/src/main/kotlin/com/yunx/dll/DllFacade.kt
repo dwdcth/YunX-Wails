@@ -939,6 +939,57 @@ object DllFacade {
                     )
                 }
 
+                "share_transfer_batch" -> {
+                    // 批量转存（对齐桌面 ResolveViewModel:464 批量转存入口）：
+                    // ①整批空间预算只查一次（ensureBatchSpace），不够整批中止；
+                    // ②逐项 skipSpaceCheck=true 免二次配额校验；
+                    // ③单项失败不中断其余（对齐桌面 runCatching 口径），返回成功数+失败清单。
+                    val plat = ResolveGateway.platform
+                        ?: return error("尚未解析任何分享").toString()
+                    val session = ResolveGateway.session!!
+                    val repo = ResolveGateway.repoFor(plat)
+                    val cred = runBlocking { ResolveGateway.credentialFor(plat) }
+                    if (cred.isBlank()) {
+                        return error("转存需要登录${plat.name}，请先在网盘页登录").toString()
+                    }
+                    val arr = req.optJSONArray("files") ?: JSONArray()
+                    if (arr.length() == 0) return error("批量转存列表为空").toString()
+                    val files = (0 until arr.length()).map { i ->
+                        val o = arr.optJSONObject(i) ?: JSONObject()
+                        ShareFile(
+                            fid = o.getString("fid"),
+                            fname = o.optString("fname"),
+                            fsize = o.optLong("fsize", 0L),
+                            isdir = o.optBoolean("isdir"),
+                            pdirFid = "", fidToken = o.optString("fidToken"),
+                        )
+                    }
+                    val toDirFid = req.getString("toDirFid")
+                    var okCount = 0
+                    val failures = JSONArray()
+                    runBlocking {
+                        // 不支持配额查询的平台默认返回 false 不抛错 → 视为通过（接口默认实现语义）
+                        runCatching { repo.ensureBatchSpace(files.map { it.fsize }, cred) }
+                            .getOrElse { e -> return@runBlocking error(e.message ?: "剩余空间不足") }
+                        for (f in files) {
+                            val r = if (plat == SharePlatform.QUARK) {
+                                (repo as com.yunx.app.data.repository.QuarkResolveRepository)
+                                    .saveToCloud(session, f, toDirFid, cred, skipSpaceCheck = true)
+                            } else {
+                                repo.transferFile(session, f, toDirFid, cred, skipSpaceCheck = true)
+                            }
+                            r.fold(
+                                onSuccess = { okCount++ },
+                                onFailure = {
+                                    failures.put(JSONObject().put("fid", f.fid)
+                                        .put("error", it.message ?: "转存失败"))
+                                },
+                            )
+                        }
+                    }?.let { return it.toString() }
+                    resp.put("transferred", okCount).put("total", files.size).put("failures", failures)
+                }
+
                 "account_login_cookie" -> {
                     val plat = platformOf(req.getString("platform"))
                         ?: return error("未知平台").toString()

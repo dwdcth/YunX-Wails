@@ -209,12 +209,17 @@ async function doBatchTransfer(targetFid: string) {
   batchTransferring.value = false
   if (!files.length || batchBusy.value) return
   batchBusy.value = true
-  const r = await shareTransferBatch(files, targetFid)
-  batchBusy.value = false
-  selected.value.clear()
-  flash(r.failCount === 0
-    ? `已转存 ${r.okCount} 个文件`
-    : `转存完成：成功 ${r.okCount} · 失败 ${r.failCount}${r.lastError ? `（${r.lastError}）` : ''}`)
+  try {
+    const r = await shareTransferBatch(files, targetFid)
+    selected.value.clear()
+    flash(r.failCount === 0
+      ? `已转存 ${r.okCount} 个文件`
+      : `转存完成：成功 ${r.okCount} · 失败 ${r.failCount}${r.lastError ? `（${r.lastError}）` : ''}`)
+  } catch (e) {
+    error.value = String(e) // 整批中止（如剩余空间不足）：保持勾选，用户可处理后重试
+  } finally {
+    batchBusy.value = false
+  }
 }
 
 /** 文件夹批量下载：整目录入队为一个批次，进度见下载页「批量任务」卡 */

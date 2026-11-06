@@ -576,23 +576,22 @@ export async function shareLink(f: ShareFile): Promise<{
   })
 }
 
-/** 多选批量转存：逐个调 share_transfer（单个失败不中断其余），返回成功/失败数与首个错误 */
+/** 多选批量转存：单条 share_transfer_batch 命令（整批空间预算只查一次、逐项免二次校验，
+ *  单项失败不中断其余——对齐原版批量转存口径）；失败时整批中止并抛出原因 */
 export async function shareTransferBatch(files: ShareFile[], toDirFid: string): Promise<{
   okCount: number; failCount: number; lastError?: string
 }> {
-  let okCount = 0
-  let failCount = 0
-  let lastError: string | undefined
-  for (const f of files) {
-    try {
-      const r = await shareTransfer(f, toDirFid)
-      if (r.ok) okCount++
-      else { failCount++; lastError = r.error }
-    } catch (e) {
-      failCount++
-      lastError = String(e)
-    }
-  }
+  const r = await call<{ ok: boolean; error?: string; transferred?: number; total?: number; failures?: { fid: string; error?: string }[] }>(
+    'share_transfer_batch', {
+      toDirFid,
+      files: files.map((f) => ({
+        fid: f.fid, fname: f.fname, fsize: f.fsize, fidToken: f.fidToken, isdir: f.isdir,
+      })),
+    })
+  if (!r.ok) throw new Error(r.error ?? '批量转存失败')
+  const okCount = r.transferred ?? 0
+  const failCount = (r.total ?? files.length) - okCount
+  const lastError = r.failures?.[0]?.error
   return { okCount, failCount, lastError }
 }
 
