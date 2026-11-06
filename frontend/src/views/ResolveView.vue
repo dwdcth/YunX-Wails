@@ -5,9 +5,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  bookmarkAdd, downloadSubmit, fmtBytes, githubDownload, githubResolve, linkHistoryAdd,
-  linkHistoryClear, linkHistoryDelete, linkHistoryList, shareDownload, shareFolderDownload,
-  shareLink, shareList, shareResolve, shareTransfer, shareTransferBatch,
+  bookmarkAdd, downloadSubmit, fmtBytes, githubDownload, githubResolve, isNormalDownloadLink,
+  linkHistoryAdd, linkHistoryClear, linkHistoryDelete, linkHistoryList, normalDownloadSubmit,
+  shareDownload, shareFolderDownload, shareLink, shareList, shareResolve, shareTransfer,
+  shareTransferBatch,
   type GithubAsset, type LinkHistoryItem, type ShareDetail, type ShareFile,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
@@ -31,6 +32,39 @@ const transferring = ref<ShareFile | null>(null)
 
 // GitHub Release 详情（命中 github.com/<owner>/<repo>/releases 时替代网盘分享详情）
 const gh = ref<{ url: string; repo: string; tag: string; assets: GithubAsset[] } | null>(null)
+
+// ---- 普通下载分流（ftp/磁力/ed2k/bc1/种子/Metalink → NormalDownloadSubmit，aria2-next / 内置 FTP）----
+
+// 纯 http(s) 直链的「不是网盘分享，是否作为普通下载？」建议（不自动提交，用户点按钮才入队）
+const normalSuggest = ref('')
+// 上面场景里分享解析给出的失败原因（卡片里附带展示，便于分辨「不是分享」与「解析出错」）
+const normalSuggestErr = ref('')
+// 提交成功后的顶部提示（带「去下载页」跳转，30 秒自动消失）
+const normalNotice = ref('')
+const normalBusy = ref(false)
+
+/** 提交普通下载：成功 toast + 顶部可跳下载页提示 */
+async function submitNormal(source: string) {
+  if (normalBusy.value) return
+  normalBusy.value = true
+  error.value = ''
+  try {
+    const r = await normalDownloadSubmit(source, '')
+    if (r.ok) {
+      const which = r.taskIds && r.taskIds.length > 1
+        ? `${r.taskIds.length} 个任务` : `任务 #${r.taskId ?? ''}`
+      flash(`已加入普通下载（${which}），进度见下载页`)
+      normalNotice.value = r.name || source
+      setTimeout(() => (normalNotice.value = ''), 30_000)
+    } else {
+      error.value = r.error ?? '提交普通下载失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    normalBusy.value = false
+  }
+}
 
 // 剪贴板分享链接建议（Go 宿主事件，对齐原版 ClipboardLinkPopup）
 const clipboardLink = ref('')
@@ -267,6 +301,8 @@ async function parse(text?: string, pwdOverride?: string) {
   error.value = ''
   detail.value = null
   gh.value = null
+  normalSuggest.value = ''
+  normalSuggestErr.value = ''
   try {
     // GitHub releases 链接：走 github_resolve，不走网盘分享会话
     if (GITHUB_RE.test(url)) {
@@ -275,7 +311,17 @@ async function parse(text?: string, pwdOverride?: string) {
     }
     const r = await shareResolve(url, p)
     if (!r.ok) {
-      error.value = r.error ?? '解析失败'
+      // 分享解析没接住（found=false）→ 普通链接兜底（不打架：只在解析失败分支出现）。
+      // ftp/磁力/ed2k/bc1 与 .torrent/.metalink 后缀是明确普通链接 → 直接提交；
+      // 纯 http(s) 直链 → 只给「直接下载」按钮，不自动提交。
+      if (isNormalDownloadLink(url)) {
+        await submitNormal(url)
+      } else if (/^https?:\/\//i.test(url)) {
+        normalSuggest.value = url
+        normalSuggestErr.value = r.error ?? ''
+      } else {
+        error.value = r.error ?? '解析失败'
+      }
     } else {
       detail.value = r
       dirStack.value = [{ fid: r.dirFid, name: r.title || '根目录' }]
@@ -395,7 +441,8 @@ Events.On('clipboard:link', (data: unknown) => {
   <div class="page">
     <div class="card">
       <h3>解析分享链接</h3>
-      <p class="hint">支持夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云（优享版），未登录也可解析与部分平台下载</p>
+      <p class="hint">支持夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云（优享版），未登录也可解析与部分平台下载；
+        磁力 / BT 种子 / ed2k / Metalink / FTP 及 .torrent 链接自动转入普通下载（aria2-next）</p>
       <div style="display: flex; flex-direction: column; gap: 10px">
         <div class="row">
           <div class="field" style="flex: 1; min-width: 260px">
@@ -420,6 +467,13 @@ Events.On('clipboard:link', (data: unknown) => {
         </div>
       </div>
       <div v-if="toast" class="banner" style="margin-top: 10px">{{ toast }}</div>
+      <!-- 普通下载提交成功：顶部提示可跳下载页（30 秒自动消失） -->
+      <div v-if="normalNotice" class="row banner" style="margin-top: 10px; gap: 8px">
+        <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+              :title="normalNotice">⬇️ 已加入普通下载：{{ normalNotice }}</span>
+        <button class="btn tonal small" style="flex: none" @click="router.push('/download')">去下载页</button>
+        <button class="btn text small" style="flex: none" @click="normalNotice = ''">关闭</button>
+      </div>
       <div v-if="clipboardLink && isVideoLink(clipboardLink)" class="row banner" style="margin-top: 10px; gap: 8px">
         <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
               :title="clipboardLink">📋 剪贴板检测到视频链接：{{ clipboardLink }}</span>
@@ -435,6 +489,28 @@ Events.On('clipboard:link', (data: unknown) => {
     </div>
 
     <div v-if="error" class="banner error">{{ error }}</div>
+
+    <!-- 纯 http(s) 直链兜底：分享解析没接住时问一句，不自动提交 -->
+    <div v-if="normalSuggest" class="card">
+      <div class="row" style="justify-content: space-between; gap: 10px">
+        <div style="min-width: 0; flex: 1">
+          <b style="font-size: 14px">不是网盘分享，是否作为普通下载？</b>
+          <div class="hint" style="margin-top: 4px; overflow: hidden; text-overflow: ellipsis;
+                                   white-space: nowrap" :title="normalSuggest">{{ normalSuggest }}</div>
+          <div v-if="normalSuggestErr" class="hint" style="margin-top: 2px">
+            分享解析：{{ normalSuggestErr }}（若这其实是个文件直链，可用普通下载）
+          </div>
+        </div>
+        <span class="row" style="flex: none">
+          <button class="btn text small" @click="normalSuggest = ''">忽略</button>
+          <button class="btn tonal small" :disabled="normalBusy"
+                  @click="submitNormal(normalSuggest); normalSuggest = ''">
+            {{ normalBusy ? '提交中…' : '直接下载' }}
+          </button>
+        </span>
+      </div>
+      <p class="hint" style="margin: 8px 0 0">经 aria2-next 引擎下载（HTTP 直链），与网盘任务并列显示在下载页</p>
+    </div>
 
     <!-- GitHub Release 详情（github_resolve 分支，替代网盘分享详情） -->
     <div v-if="gh" class="card">

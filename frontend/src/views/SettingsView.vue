@@ -4,8 +4,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
-import { fmtBytes, githubMirrorRefresh, kvPut, settingsList, settingsSet, settingsSetPlatform,
-         storageApplyEncryption, storageMigrateDb, updateCheck, type AppSettings } from '../core'
+import { ARIA2_PATH_KEY, aria2Status, fmtBytes, githubMirrorRefresh, kvGet, kvPut,
+         settingsList, settingsSet, settingsSetPlatform,
+         storageApplyEncryption, storageMigrateDb, updateCheck,
+         type AppSettings, type Aria2StatusInfo } from '../core'
 import { applySeedColor, cachedSeedColor, seedNumToHex, setThemeMode, theme } from '../theme'
 
 const router = useRouter()
@@ -246,6 +248,77 @@ async function doMirrorRefresh() {
     done(`测速失败：${e}`)
   }
 }
+
+// ---- 下载引擎（普通下载：aria2-next + 内置 FTP；对位原版 DownloadEngineScreen，替代 Gopeed 占位）----
+
+const aria2 = ref<Aria2StatusInfo | null>(null)
+const aria2Loading = ref(false)
+const aria2Path = ref('')
+const aria2Saving = ref(false)
+const aria2Flash = ref('')
+
+async function loadAria2() {
+  aria2Loading.value = true
+  try {
+    aria2.value = await aria2Status()
+  } catch (e) {
+    aria2.value = { ok: false, error: String(e) }
+  } finally {
+    aria2Loading.value = false
+  }
+}
+
+async function loadAria2Path() {
+  try { aria2Path.value = (await kvGet(ARIA2_PATH_KEY)) ?? '' } catch { /* 读不到按空处理 */ }
+}
+
+/** 保存 aria2-next 路径到核心 kv（settings.aria2Path；后端优先级 kv > env > PATH > tools 目录）。
+ *  Aria2Status 每次现查 FindBinary，保存后立即重检反映新路径。 */
+async function saveAria2Path() {
+  if (aria2Saving.value) return
+  aria2Saving.value = true
+  try {
+    const ok = await kvPut(ARIA2_PATH_KEY, aria2Path.value.trim())
+    aria2Flash.value = ok ? '已保存 ✓（按 kv > 环境变量 > PATH > 工具目录 生效）' : '写入失败'
+    if (ok) await loadAria2()
+  } catch (e) {
+    aria2Flash.value = `失败：${e}`
+  } finally {
+    aria2Saving.value = false
+    setTimeout(() => (aria2Flash.value = ''), 4000)
+  }
+}
+
+// 状态区三态：运行中（绿点+版本+端口）/ 已找到未运行（灰点，首个任务自动拉起）/ 未安装（红点+引导）
+const aria2DotClass = computed(() => {
+  const st = aria2.value
+  if (!st || !st.ok || st.found === false) return 'off'
+  return st.running ? 'on' : 'idle'
+})
+
+const aria2StateText = computed(() => {
+  const st = aria2.value
+  if (!st && aria2Loading.value) return '检测引擎状态…'
+  if (!st || !st.ok) return '引擎状态未知'
+  if (st.found === false) return '未安装 aria2-next'
+  if (st.running) return 'aria2-next 运行中'
+  return '已找到 aria2-next（未运行）'
+})
+
+const aria2Sub = computed(() => {
+  const st = aria2.value
+  if (!st || !st.ok || st.found === false) return ''
+  if (st.running) {
+    const parts: string[] = []
+    if (st.version) parts.push(`版本 ${st.version.startsWith('v') ? st.version : `v${st.version}`}`)
+    if (st.port) parts.push(`RPC 端口 ${st.port}`)
+    if (st.binPath) parts.push(st.binPath)
+    return parts.join(' · ')
+  }
+  return st.binPath
+    ? `${st.binPath} · 提交首个磁力 / BT 任务时自动启动`
+    : '提交首个磁力 / BT 任务时自动启动'
+})
 
 // ---- 忽略版本（kv：misc.ignored_version，更新检查核心侧据此跳过该版本）----
 
@@ -494,6 +567,8 @@ async function saveFfmpeg(auto = false) {
 onMounted(() => {
   load()
   loadLegacy() // 原版数据探测（纯 Go 文件检查，不影响设置加载）
+  loadAria2() // 普通下载引擎状态（Aria2Status；失败不影响设置加载）
+  loadAria2Path() // aria2-next 路径回显（kv settings.aria2Path）
 })
 </script>
 
@@ -864,9 +939,43 @@ onMounted(() => {
       <p class="hint" style="margin: 8px 0 0">每行一条，空行与 # 开头的注释行会被忽略</p>
     </div>
 
+    <!-- 下载引擎（对位原版 DownloadEngineScreen，替代 Gopeed 占位）：aria2-next 状态 + 路径配置 -->
     <div class="card">
-      <h3>更多分组<span class="tag-m6">后续批次</span></h3>
-      <p class="hint">Gopeed 引擎管理 —— 待后续批次接入</p>
+      <h3>下载引擎</h3>
+      <p class="hint">磁力 / BT / ed2k / Metalink / 普通 HTTP 直链 → aria2-next；FTP/FTPS → 内置引擎；
+        网盘直链 → 内置分片引擎（不受本卡配置影响）</p>
+
+      <!-- 状态区：运行中（绿点+版本+端口）/ 已找到未运行 / 未安装（引导）/ 引擎不可用 -->
+      <div class="pathrow" style="margin-bottom: 12px">
+        <div class="row" style="gap: 8px">
+          <span class="dot" :class="aria2DotClass" />
+          <span style="font-weight: 600">{{ aria2Loading && !aria2 ? '检测引擎状态…' : aria2StateText }}</span>
+          <button class="btn text small" title="重新检测" @click="loadAria2">刷新</button>
+        </div>
+        <div v-if="aria2Sub" class="hint" style="margin-top: 3px; word-break: break-all">{{ aria2Sub }}</div>
+      </div>
+
+      <div v-if="aria2 && !aria2.ok" class="banner error" style="margin-bottom: 12px">
+        普通下载引擎不可用：{{ aria2.error ?? '未知错误' }}
+      </div>
+      <div v-else-if="aria2 && aria2.found === false" class="banner" style="margin-bottom: 12px">
+        未找到 aria2-next 二进制：请安装到系统 PATH，或放到
+        <code class="codepath">~/.local/share/yunx-desktop/tools/aria2-next</code>，
+        或在下方路径框直接配置
+      </div>
+
+      <!-- 配置项：aria2-next 路径（kv settings.aria2Path，优先级 kv > 环境变量 > PATH > 工具目录） -->
+      <div class="field" style="margin-bottom: 6px">
+        <label>aria2-next 可执行文件路径（留空 = 自动探测；保存后立即生效，对之后提交的任务生效）</label>
+        <div class="row" style="flex-wrap: nowrap">
+          <input v-model="aria2Path" class="input" style="flex: 1" placeholder="/usr/bin/aria2-next"
+                 @keydown.enter="saveAria2Path" />
+          <button class="btn tonal small" :disabled="aria2Saving" @click="saveAria2Path">
+            {{ aria2Saving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </div>
+      <p v-if="aria2Flash" class="hint" style="margin: 6px 0 0">{{ aria2Flash }}</p>
     </div>
 
     <!-- 原版数据导入确认（设置页手动触发；成功后需重启才能读到导入的数据） -->
@@ -979,6 +1088,11 @@ onMounted(() => {
 /* 储存目录：路径展示条（等宽、区分「当前生效 / 重启后生效」）与加密档位单选行 */
 .pathrow { display: flex; flex-direction: column; gap: 2px; background: var(--surface-container);
   border-radius: 8px; padding: 8px 12px; }
+/* 下载引擎状态圆点：运行中绿 / 已找到未运行灰 / 未安装或不可用红 */
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; display: inline-block; }
+.dot.on { background: var(--success); box-shadow: 0 0 6px color-mix(in srgb, var(--success) 55%, transparent); }
+.dot.idle { background: var(--outline); }
+.dot.off { background: var(--error); }
 .pathlabel { font-size: 11.5px; color: var(--on-bg-variant); }
 .codepath { font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
   font-size: 12.5px; word-break: break-all; }

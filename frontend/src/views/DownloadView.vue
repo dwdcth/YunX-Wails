@@ -1,16 +1,22 @@
 <script setup lang="ts">
-// 下载页：内置下载引擎的真实任务面板（对齐原版 DownloadScreen 的核心能力面）。
-// 提交 → download_submit 立即返回；列表/进度 800ms 轮询 download_list（核心侧 500ms 落盘节流 + 内存实时速度）。
-// 扩展：行复选多选批量操作 / 全局批量栏（全部暂停/开始/删除）/ 按目录分组 / 行内 ⋯ 菜单（复制直链/重新下载/打开文件）/
-// ffmpeg 合轨进度（download_list stats.mergePercent 橙色条）/ 文件夹批量任务（share_folder_download 的 batch_list 轮询）/
-// 下载调试弹窗（设置开 downloadDebug 才显示行菜单入口；对齐原版 DownloadDebugScreen，5 秒轮询拉取式快照）。
+// 下载页：双引擎合并任务面板（对齐原版 DownloadScreen 的核心能力面）。
+// 云盘任务：download_submit / download_list 800ms 轮询（核心侧 500ms 落盘节流 + 内存实时速度）。
+// 普通下载任务：NormalDownloadSubmit / NormalDownloadList 同频轮询（独立库 downloads.db；
+// 磁力/BT/ed2k/Metalink/HTTP → aria2-next，FTP → Go 内置引擎）→ 两库合并一张列表，按来源路由行内操作。
+// 扩展：行复选多选批量操作 / 全局批量栏（全部暂停/开始/删除，同时作用两个引擎）/ 按目录分组 /
+// 行内 ⋯ 菜单（复制链接/重新下载/打开文件）/ ffmpeg 合轨进度（download_list stats.mergePercent 橙色条）/
+// 文件夹批量任务（share_folder_download 的 batch_list 轮询）/ 下载调试弹窗（仅云盘任务；对齐原版 DownloadDebugScreen）。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   batchList, downloadDebugExport, downloadDebugInfo, downloadGetLink, downloadList,
   downloadListFull, downloadPause, downloadPauseAll, downloadDebugPreempt, downloadRedownload,
   downloadRemove, downloadRemoveAll, downloadResume, downloadResumeAll, downloadSubmit,
-  fmtBytes, fmtRemain, fmtSpeed, settingsList, settingsSet, shutdownNow,
-  type BatchTask, type DebugChunk, type DebugInfo, type DownloadStats, type DownloadTask,
+  fmtBytes, fmtRemain, fmtSpeed, isNormalDownloadLink, NORMAL_STATUS_TEXT,
+  normalDownloadList, normalDownloadPause, normalDownloadPauseAll, normalDownloadRemove,
+  normalDownloadRemoveAll, normalDownloadResume, normalDownloadResumeAll, normalDownloadSubmit,
+  normalStatusCode, settingsList, settingsSet, shutdownNow,
+  type BatchTask, type DebugChunk, type DebugInfo, type DownloadStats,
+  type DownloadTask, type NormalOpResult, type NormalTask,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
 import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
@@ -22,6 +28,9 @@ const submitting = ref(false)
 const submitError = ref('')
 const tasks = ref<DownloadTask[]>([])
 const listError = ref('')
+// 普通下载任务（aria2-next / FTP 引擎，独立任务库；与云盘任务同频轮询合并展示）
+const normalTasks = ref<NormalTask[]>([])
+const normalListError = ref('')
 let timer: number | undefined
 
 // download_list 的 stats（mergePercent>0 且 <100 = 有任务在 ffmpeg 合轨阶段）
@@ -31,8 +40,8 @@ const merging = computed(() => {
   return p > 0 && p < 100 ? p : 0
 })
 
-// 多选批量（与网盘页共用 .ck 复选样式）
-const selected = ref(new Set<number>())
+// 多选批量（与网盘页共用 .ck 复选样式；key 用合并行 key，跨两库不撞 id）
+const selected = ref(new Set<string>())
 
 // 按目录分组
 const grouped = ref(false)
@@ -47,28 +56,116 @@ async function refresh() {
     tasks.value = r.tasks ?? []
     stats.value = r.stats ?? null
     listError.value = ''
-    // WebKitGTK 在内容高度骤减时可能不自动钳制滚动位置 → 手动重置
-    if (tasks.value.length < prevTaskCount) {
-      requestAnimationFrame(() => {
-        const el = document.querySelector('.content')
-        if (el) el.scrollTop = 0
-      })
-    }
-    prevTaskCount = tasks.value.length
   } catch (e) {
     listError.value = String(e)
+  }
+  // 普通下载任务（独立库 downloads.db）：同频轮询，失败只提示不阻塞云盘列表
+  try {
+    const r = await normalDownloadList()
+    normalTasks.value = r.tasks ?? []
+    normalListError.value = r.ok ? '' : (r.error ?? '读取普通下载列表失败')
+  } catch (e) {
+    normalListError.value = String(e)
   }
   try {
     batches.value = await batchList()
   } catch { /* 批量接口失败不影响任务列表展示 */ }
+  // WebKitGTK 在内容高度骤减时可能不自动钳制滚动位置 → 手动重置
+  const count = tasks.value.length + normalTasks.value.length
+  if (count < prevTaskCount) {
+    requestAnimationFrame(() => {
+      const el = document.querySelector('.content')
+      if (el) el.scrollTop = 0
+    })
+  }
+  prevTaskCount = count
+}
+
+// ---- 双引擎合并行模型：云盘任务与普通任务归一成一套字段，行内操作按来源路由 ----
+
+/** 合并行：cloud=true 走 download_*（id=taskId），false 走 NormalDownload*（id=任务库自增 id） */
+interface MergedRow {
+  key: string // 'c<taskId>' / 'n<id>'（两库 id 独立，key 加前缀防撞）
+  cloud: boolean
+  id: number
+  fileName: string
+  statusCode: number // 统一成云盘口径：0等待 1下载中 2已暂停 3已完成 4失败
+  statusText: string
+  total: number
+  downloaded: number
+  speed: number
+  avgSpeed: number // 普通任务无均速，展示时跳过
+  remainMillis: number
+  savePath: string
+  platform: string // 云盘任务来源平台
+  engine: string // 普通任务引擎标签：aria2-next / FTP
+  error: string
+  url: string // 普通任务原始链接（复制链接用；磁力/种子即其本体）
+}
+
+function cloudRow(t: DownloadTask): MergedRow {
+  return {
+    key: `c${t.taskId}`, cloud: true, id: t.taskId, fileName: t.fileName,
+    statusCode: t.status, statusText: t.statusText, total: t.total, downloaded: t.downloaded,
+    speed: t.speed, avgSpeed: t.avgSpeed, remainMillis: t.remainMillis,
+    savePath: t.savePath ?? '', platform: t.platform ?? '', engine: '', error: t.error ?? '', url: '',
+  }
+}
+
+function normalRow(t: NormalTask): MergedRow {
+  const remain = t.speed > 0 && t.size > t.downloaded
+    ? Math.round(((t.size - t.downloaded) / t.speed) * 1000) : 0
+  return {
+    key: `n${t.id}`, cloud: false, id: t.id,
+    fileName: t.name || t.url || `任务 #${t.id}`,
+    statusCode: normalStatusCode(t.status), statusText: NORMAL_STATUS_TEXT[t.status] ?? t.status,
+    total: t.size, downloaded: t.downloaded, speed: t.speed, avgSpeed: 0, remainMillis: remain,
+    savePath: t.savePath ?? '', platform: '', engine: t.engine === 'ftp' ? 'FTP' : 'aria2-next',
+    error: t.err ?? '', url: t.url,
+  }
+}
+
+/** 合并列表：云盘任务在前（原顺序），普通任务在后（createdAt 倒序，Go 侧已排好） */
+const rows = computed<MergedRow[]>(() => [
+  ...tasks.value.map(cloudRow),
+  ...normalTasks.value.map(normalRow),
+])
+
+/** 行内操作按来源路由（暂停/继续/删除；删除对已完成云盘任务连带删本地文件，普通任务一律不删） */
+function pauseRow(row: MergedRow) {
+  return row.cloud ? downloadPause(row.id) : normalDownloadPause(row.id)
+}
+
+function resumeRow(row: MergedRow) {
+  return row.cloud ? downloadResume(row.id) : normalDownloadResume(row.id)
+}
+
+function removeRow(row: MergedRow) {
+  return row.cloud
+    ? downloadRemove(row.id, row.statusCode === 3)
+    : normalDownloadRemove(row.id)
 }
 
 async function submit() {
-  if (!url.value.trim() || submitting.value) return
+  const u = url.value.trim()
+  if (!u || submitting.value) return
   submitting.value = true
   submitError.value = ''
   try {
-    const r = await downloadSubmit(url.value.trim(), fileName.value.trim(), saveDir.value.trim())
+    // 普通链接（磁力/FTP/种子/Metalink）：内置引擎接不住，转普通下载（aria2-next / FTP）
+    if (isNormalDownloadLink(u)) {
+      const r = await normalDownloadSubmit(u, saveDir.value.trim())
+      if (!r.ok) {
+        submitError.value = r.error ?? '提交失败'
+      } else {
+        url.value = ''
+        fileName.value = ''
+        cancelShutdown() // 加新任务时自动取消关机
+        await refresh()
+      }
+      return
+    }
+    const r = await downloadSubmit(u, fileName.value.trim(), saveDir.value.trim())
     if (!r.ok) {
       submitError.value = r.error ?? '提交失败'
     } else {
@@ -89,19 +186,21 @@ async function act(fn: () => Promise<unknown>) {
   setTimeout(refresh, 150)
 }
 
-function toggleSel(taskId: number) {
-  if (selected.value.has(taskId)) selected.value.delete(taskId)
-  else selected.value.add(taskId)
+function toggleSel(key: string) {
+  if (selected.value.has(key)) selected.value.delete(key)
+  else selected.value.add(key)
 }
 
-/** 批量操作：循环调单任务命令（单个失败继续处理其余），完成后刷新并清空选择 */
+/** 批量操作：按行来源路由到对应引擎（单个失败继续处理其余），完成后刷新并清空选择 */
 async function batchAct(kind: 'pause' | 'resume' | 'remove') {
-  const ids = [...selected.value]
-  for (const id of ids) {
+  const keys = [...selected.value]
+  for (const key of keys) {
+    const row = rows.value.find((r) => r.key === key)
+    if (!row) continue
     try {
-      if (kind === 'pause') await downloadPause(id)
-      else if (kind === 'resume') await downloadResume(id)
-      else await downloadRemove(id, tasks.value.find((t) => t.taskId === id)?.status === 3)
+      if (kind === 'pause') await pauseRow(row)
+      else if (kind === 'resume') await resumeRow(row)
+      else await removeRow(row)
     } catch { /* 保持批量语义，不中断 */ }
   }
   selected.value.clear()
@@ -117,102 +216,129 @@ function showNotice(msg: string) {
   setTimeout(() => (notice.value = ''), 2600)
 }
 
+/** 全局批量兜底：普通引擎无任务时跳过其操作，避免无谓提示 */
+async function normalAll(fn: () => Promise<NormalOpResult>): Promise<string> {
+  if (normalTasks.value.length === 0) return ''
+  try {
+    const r = await fn()
+    return r.ok ? '' : (r.error ?? '普通任务操作失败')
+  } catch (e) { return `普通任务：${e}` }
+}
+
 async function pauseAll() {
+  const parts: string[] = []
   try {
     const r = await downloadPauseAll()
-    showNotice(r.ok ? `已暂停 ${r.paused} 个任务` : r.error ?? '操作失败')
-  } catch (e) { showNotice(String(e)) }
+    parts.push(r.ok ? `云盘已暂停 ${r.paused} 个` : r.error ?? '云盘操作失败')
+  } catch (e) { parts.push(`云盘：${e}`) }
+  const nErr = await normalAll(normalDownloadPauseAll)
+  if (nErr) parts.push(nErr)
+  showNotice(parts.join('；'))
   setTimeout(refresh, 150)
 }
 
 async function resumeAll() {
+  const parts: string[] = []
   try {
     const r = await downloadResumeAll()
-    showNotice(r.ok ? `已开始 ${r.resumed} 个任务` : r.error ?? '操作失败')
-  } catch (e) { showNotice(String(e)) }
+    parts.push(r.ok ? `云盘已开始 ${r.resumed} 个` : r.error ?? '云盘操作失败')
+  } catch (e) { parts.push(`云盘：${e}`) }
+  const nErr = await normalAll(normalDownloadResumeAll)
+  if (nErr) parts.push(nErr)
+  showNotice(parts.join('；'))
   setTimeout(refresh, 150)
 }
 
-// 全部删除确认弹窗（含「同时删除本地文件」）
+// 全部删除确认弹窗（含「同时删除本地文件」——仅云盘引擎支持，普通任务一律不删文件）
 const removeAllOpen = ref(false)
 const removeAllDeleteLocal = ref(false)
 const removeAllBusy = ref(false)
 
 async function doRemoveAll() {
   removeAllBusy.value = true
+  const parts: string[] = []
   try {
     const r = await downloadRemoveAll(removeAllDeleteLocal.value)
-    if (r.ok) {
-      removeAllOpen.value = false
-      showNotice(`已删除 ${r.removed} 个任务`)
-    } else {
-      showNotice(r.error ?? '删除失败')
-    }
-  } catch (e) { showNotice(String(e)) } finally {
-    removeAllBusy.value = false
-  }
+    if (r.ok) parts.push(`云盘已删除 ${r.removed} 个`)
+    else parts.push(r.error ?? '云盘删除失败')
+  } catch (e) { parts.push(`云盘：${e}`) }
+  const nErr = await normalAll(normalDownloadRemoveAll)
+  parts.push(nErr ? nErr : (normalTasks.value.length ? '普通任务已清空' : ''))
+  showNotice(parts.filter(Boolean).join('；'))
+  removeAllBusy.value = false
+  removeAllOpen.value = false
   setTimeout(refresh, 150)
 }
 
-// ---- 行内 ⋯ 菜单：复制直链 / 重新下载（失败任务）/ 打开文件（已完成）----
+// ---- 行内 ⋯ 菜单：复制链接 / 重新下载（失败云盘任务）/ 打开文件（已完成）----
 
-const menuFor = ref(0)
+const menuFor = ref('')
 
-function toggleMenu(taskId: number) {
-  menuFor.value = menuFor.value === taskId ? 0 : taskId
+function toggleMenu(key: string) {
+  menuFor.value = menuFor.value === key ? '' : key
 }
 
-async function copyLink(t: DownloadTask) {
-  menuFor.value = 0
+async function copyLink(row: MergedRow) {
+  menuFor.value = ''
   try {
-    const r = await downloadGetLink(t.taskId)
+    // 普通任务：链接就在任务上（磁力/种子/FTP 即其本体），无需回核心现取
+    if (!row.cloud) {
+      if (row.url) {
+        await navigator.clipboard.writeText(row.url)
+        showNotice(`链接已复制：${row.fileName}`)
+      } else {
+        showNotice('该任务没有可复制的链接')
+      }
+      return
+    }
+    const r = await downloadGetLink(row.id)
     if (r.ok && r.url) {
       await navigator.clipboard.writeText(r.url)
-      showNotice(`直链已复制：${r.fileName || t.fileName}`)
+      showNotice(`直链已复制：${r.fileName || row.fileName}`)
     } else {
       showNotice(r.error ?? '取直链失败')
     }
   } catch (e) { showNotice(String(e)) }
 }
 
-async function redownload(t: DownloadTask) {
-  menuFor.value = 0
+/** 重新下载仅云盘引擎提供（入口也只在云盘失败行出现） */
+async function redownload(row: MergedRow) {
+  menuFor.value = ''
   try {
-    const r = await downloadRedownload(t.taskId)
-    showNotice(r.ok ? `「${t.fileName}」已重新入队` : r.error ?? '重新下载失败')
+    const r = await downloadRedownload(row.id)
+    showNotice(r.ok ? `「${row.fileName}」已重新入队` : r.error ?? '重新下载失败')
   } catch (e) { showNotice(String(e)) }
   setTimeout(refresh, 150)
 }
 
-function openFile(t: DownloadTask) {
-  menuFor.value = 0
-  if (t.savePath) CoreService.OpenFile(t.savePath).catch((e) => console.warn('打开失败:', e))
+function openFile(row: MergedRow) {
+  menuFor.value = ''
+  if (row.savePath) CoreService.OpenFile(row.savePath).catch((e) => console.warn('打开失败:', e))
 }
 
-function openDirectory(t: DownloadTask) {
-  menuFor.value = 0
-  if (t.savePath) CoreService.OpenDirectory(t.savePath).catch((e) => console.warn('打开目录失败:', e))
+function openDirectory(row: MergedRow) {
+  menuFor.value = ''
+  if (row.savePath) CoreService.OpenDirectory(row.savePath).catch((e) => console.warn('打开目录失败:', e))
 }
 
 // 点击菜单外区域收起行菜单
 function closeMenu(e: MouseEvent) {
   if (!menuFor.value) return
-  if (!(e.target as HTMLElement).closest('.rowmenu-wrap')) menuFor.value = 0
+  if (!(e.target as HTMLElement).closest('.rowmenu-wrap')) menuFor.value = ''
 }
 
-function dirOf(t: DownloadTask): string {
-  const p = t.savePath ?? ''
+function dirOfPath(p: string): string {
   if (!p) return ''
   const i = p.lastIndexOf('/')
   return i > 0 ? p.slice(0, i) : p
 }
 
 const groups = computed(() => {
-  const m = new Map<string, DownloadTask[]>()
-  for (const t of tasks.value) {
-    const d = dirOf(t) || '（未知目录）'
+  const m = new Map<string, MergedRow[]>()
+  for (const row of rows.value) {
+    const d = dirOfPath(row.savePath) || '（未知目录）'
     const list = m.get(d) ?? []
-    list.push(t)
+    list.push(row)
     m.set(d, list)
   }
   return [...m.entries()].map(([dir, list]) => ({ dir, list }))
@@ -220,14 +346,14 @@ const groups = computed(() => {
 
 /** 统一分段：分组=按目录切段（带标题），平铺=单段（无标题），行渲染只写一份 */
 const sections = computed(() =>
-  grouped.value ? groups.value : [{ dir: '', list: tasks.value }])
+  grouped.value ? groups.value : [{ dir: '', list: rows.value }])
 
 function batchPct(b: BatchTask): number {
   return b.total > 0 ? Math.min(100, Math.round((b.done / b.total) * 100)) : 0
 }
 
-function progress(t: DownloadTask): number {
-  return t.total > 0 ? Math.min(100, Math.round((t.downloaded / t.total) * 100)) : 0
+function progress(row: MergedRow): number {
+  return row.total > 0 ? Math.min(100, Math.round((row.downloaded / row.total) * 100)) : 0
 }
 
 function statusClass(s: number): string {
@@ -242,8 +368,9 @@ const mergingTaskId = computed(() => {
 })
 
 // ---- 完成后关机（对齐原版 shutdownWhenDownloadsComplete 设置）----
-// 每 5 秒独立检查 download_list：所有任务均不在下载中（0/2/3/4）且至少 1 个已完成 → 弹 60 秒全屏倒计时；
-// 倒计时结束调 CoreService.Shutdown 关机；取消按钮 / 新加任务 / 条件被打破（恢复任务等）都会终止倒计时。
+// 每 5 秒独立检查两个任务库（云盘 + 普通）：所有任务均不在下载中（0/2/3/4）且至少 1 个已完成
+// → 弹 60 秒全屏倒计时；倒计时结束调 CoreService.Shutdown 关机；
+// 取消按钮 / 新加任务 / 条件被打破（恢复任务等）都会终止倒计时。
 
 const shutdownEnabled = ref(false)
 const shutdownCountdown = ref(0)
@@ -265,12 +392,17 @@ async function toggleShutdown() {
   catch { /* 写失败不打扰，下次进页重读 */ }
 }
 
-/** 每 5 秒的条件检查：满足且未在倒计时 → 启动倒计时；倒计时中条件被打破 → 自动取消 */
+/** 每 5 秒的条件检查（两库合并口径）：满足且未在倒计时 → 启动倒计时；条件被打破 → 自动取消 */
 async function checkShutdown() {
   if (!shutdownEnabled.value) return
   const list = await downloadList().catch(() => [] as DownloadTask[])
-  const settled = list.length > 0 && list.every((t) => [0, 2, 3, 4].includes(t.status))
-  const hasDone = list.some((t) => t.status === 3)
+  const normals = (await normalDownloadList().catch(() => null))?.tasks ?? []
+  const codes = [
+    ...list.map((t) => t.status),
+    ...normals.map((t) => normalStatusCode(t.status)),
+  ]
+  const settled = codes.length > 0 && codes.every((c) => [0, 2, 3, 4].includes(c))
+  const hasDone = codes.includes(3)
   if (settled && hasDone) {
     if (!shutdownCountdown.value) startCountdown()
   } else if (shutdownCountdown.value) {
@@ -415,9 +547,10 @@ async function pollDebug() {
   }
 }
 
-function openDebug(t: DownloadTask) {
-  menuFor.value = 0
-  debugTaskId.value = t.taskId
+/** 调试信息仅云盘任务有（入口也只在云盘行出现） */
+function openDebug(row: MergedRow) {
+  menuFor.value = ''
+  debugTaskId.value = row.id
   debugInfo.value = null
   debugError.value = ''
   debugExportPath.value = ''
@@ -523,7 +656,8 @@ onUnmounted(() => {
   <div class="page">
     <div class="card">
       <h3>添加下载任务</h3>
-      <p class="hint">直链（http/https）；网盘直链请先经解析获取。留空目录 = 使用默认下载目录</p>
+      <p class="hint">直链（http/https）走内置分片引擎；磁力 / BT / ed2k / Metalink / FTP 及 .torrent 链接自动转普通下载
+        （aria2-next / 内置 FTP）；网盘直链请先经解析获取。留空目录 = 使用默认下载目录</p>
       <div style="display: flex; flex-direction: column; gap: 10px">
         <div class="row">
           <div class="field" style="flex: 1; min-width: 260px">
@@ -564,12 +698,12 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 全局批量栏：与勾选无关，任务存在即显示 -->
-    <div v-if="tasks.length > 0" class="card" style="padding: 10px 20px">
+    <!-- 全局批量栏：与勾选无关，任务存在即显示（同时作用云盘引擎与普通下载引擎） -->
+    <div v-if="rows.length > 0" class="card" style="padding: 10px 20px">
       <div class="row" style="justify-content: space-between">
-        <span style="font-weight: 600">全部任务（{{ tasks.length }}）</span>
+        <span style="font-weight: 600">全部任务（{{ rows.length }}）</span>
         <span class="row">
-          <span class="row" style="gap: 8px; font-size: 13px" title="全部任务结束后弹出倒计时关机">
+          <span class="row" style="gap: 8px; font-size: 13px" title="两个引擎的全部任务结束后弹出倒计时关机">
             完成后关机
             <i class="switch" :class="{ on: shutdownEnabled }" @click="toggleShutdown" />
           </span>
@@ -594,70 +728,77 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 列表控制：按目录分组 -->
-    <div v-if="tasks.length > 0" class="card" style="padding: 10px 20px">
+    <!-- 列表控制：按目录分组（两库任务统一按 savePath 所在目录分组） -->
+    <div v-if="rows.length > 0" class="card" style="padding: 10px 20px">
       <div class="row" style="justify-content: space-between">
-        <span>按目录分组（savePath 所在目录）</span>
+        <span>按目录分组（savePath 所在目录）· 网盘 {{ tasks.length }} / 普通 {{ normalTasks.length }}</span>
         <i class="switch" :class="{ on: grouped }" @click="grouped = !grouped" />
       </div>
     </div>
 
     <div v-if="listError" class="banner error">{{ listError }}</div>
+    <div v-if="normalListError" class="banner error">普通下载：{{ normalListError }}</div>
 
-    <div v-if="tasks.length === 0" class="card">
+    <div v-if="rows.length === 0" class="card">
       <div class="empty">
         <div class="big">⬇️</div>
         <h3 style="margin: 0 0 6px">暂无下载任务</h3>
-        <p>内置分片下载引擎（32 线程 / Range 分片 / 断点续传）已就绪，添加一个直链试试。</p>
+        <p>内置分片引擎（网盘直链，32 线程 / Range 分片 / 断点续传）与普通下载引擎（aria2-next：磁力 / BT / ed2k / Metalink；内置 FTP）均已就绪。</p>
       </div>
     </div>
 
-    <!-- 任务列表：分组 / 平铺共用同一套行渲染 -->
+    <!-- 任务列表：分组 / 平铺共用同一套行渲染（云盘任务与普通任务合并，来源徽标区分） -->
     <template v-for="g in sections" :key="g.dir || '_flat'">
       <div v-if="grouped" class="row grouphdr">
         <span class="gdir" :title="g.dir">{{ g.dir }}</span>
         <span class="chip plain">{{ g.list.length }} 个任务</span>
       </div>
-      <div v-for="t in g.list" :key="t.taskId" class="card" style="padding: 14px 20px">
+      <div v-for="row in g.list" :key="row.key" class="card" style="padding: 14px 20px">
         <div class="row" style="justify-content: space-between; margin-bottom: 8px">
-          <span class="ck" :class="{ on: selected.has(t.taskId) }" title="选中"
-                @click="toggleSel(t.taskId)">
-            <AppIcon v-if="selected.has(t.taskId)" name="check" :size="13" />
+          <span class="ck" :class="{ on: selected.has(row.key) }" title="选中"
+                @click="toggleSel(row.key)">
+            <AppIcon v-if="selected.has(row.key)" name="check" :size="13" />
           </span>
           <div style="min-width: 0; flex: 1">
             <div style="font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
-                 :title="t.savePath ?? t.fileName">{{ t.fileName }}</div>
+                 :title="row.savePath || row.fileName">
+              {{ row.fileName }}
+              <!-- 普通任务来源徽标（云盘任务的 platform 在下行 meta 里以文本展示） -->
+              <span v-if="!row.cloud" class="chip plain engchip">{{ row.engine }}</span>
+            </div>
             <div style="font-size: 12px; color: var(--on-bg-variant)">
-              {{ fmtBytes(t.downloaded) }}<span v-if="t.total > 0"> / {{ fmtBytes(t.total) }}</span>
-              · {{ t.status === 1 ? fmtSpeed(t.speed) : `均速 ${fmtSpeed(t.avgSpeed)}` }}
-              <span v-if="t.status === 1 && t.remainMillis > 0"> · 剩余 {{ fmtRemain(t.remainMillis) }}</span>
-              <span v-if="t.platform"> · {{ t.platform }}</span>
+              {{ fmtBytes(row.downloaded) }}<span v-if="row.total > 0"> / {{ fmtBytes(row.total) }}</span>
+              · {{ row.statusCode === 1 ? fmtSpeed(row.speed) : row.cloud ? `均速 ${fmtSpeed(row.avgSpeed)}` : fmtSpeed(row.speed) }}
+              <span v-if="row.statusCode === 1 && row.remainMillis > 0"> · 剩余 {{ fmtRemain(row.remainMillis) }}</span>
+              <span v-if="row.cloud && row.platform"> · {{ row.platform }}</span>
             </div>
           </div>
           <div class="row" style="flex: none">
-            <span class="chip" :class="statusClass(t.status)">{{ t.statusText }}</span>
-            <button v-if="t.status === 1 || t.status === 0" class="btn tonal small" @click="act(() => downloadPause(t.taskId))">暂停</button>
-            <button v-if="t.status === 2 || t.status === 4" class="btn tonal small" @click="act(() => downloadResume(t.taskId))">
-              {{ t.status === 4 ? '重试' : '继续' }}
+            <span class="chip" :class="statusClass(row.statusCode)">{{ row.statusText }}</span>
+            <button v-if="row.statusCode === 1 || row.statusCode === 0" class="btn tonal small"
+                    @click="act(() => pauseRow(row))">暂停</button>
+            <button v-if="row.statusCode === 2 || row.statusCode === 4" class="btn tonal small"
+                    @click="act(() => resumeRow(row))">
+              {{ row.statusCode === 4 ? '重试' : '继续' }}
             </button>
-            <button class="btn text small" @click="act(() => downloadRemove(t.taskId, t.status === 3))">删除</button>
+            <button class="btn text small" @click="act(() => removeRow(row))">删除</button>
             <span class="rowmenu-wrap">
-              <button class="btn text small" title="更多操作" @click.stop="toggleMenu(t.taskId)">⋯</button>
-              <div v-if="menuFor === t.taskId" class="rowmenu">
-                <button class="menuitem" @click="copyLink(t)">复制直链</button>
-                <button v-if="t.status === 4" class="menuitem" @click="redownload(t)">重新下载</button>
-                <button v-if="downloadDebugOn" class="menuitem" @click="openDebug(t)">调试信息</button>
-                <button v-if="t.status === 3 && t.savePath" class="menuitem" @click="openDirectory(t)">打开目录</button>
-                <button v-if="t.status === 3 && t.savePath" class="menuitem" @click="openFile(t)">打开文件</button>
+              <button class="btn text small" title="更多操作" @click.stop="toggleMenu(row.key)">⋯</button>
+              <div v-if="menuFor === row.key" class="rowmenu">
+                <button class="menuitem" @click="copyLink(row)">复制链接</button>
+                <button v-if="row.cloud && row.statusCode === 4" class="menuitem" @click="redownload(row)">重新下载</button>
+                <button v-if="row.cloud && downloadDebugOn" class="menuitem" @click="openDebug(row)">调试信息</button>
+                <button v-if="row.statusCode === 3 && row.savePath" class="menuitem" @click="openDirectory(row)">打开目录</button>
+                <button v-if="row.statusCode === 3 && row.savePath" class="menuitem" @click="openFile(row)">打开文件</button>
               </div>
             </span>
           </div>
         </div>
-        <div v-if="t.total > 0" class="bar" :class="{ mergebar: mergingTaskId === t.taskId }">
-          <i :style="{ width: (mergingTaskId === t.taskId ? merging : progress(t)) + '%' }" />
+        <div v-if="row.total > 0" class="bar" :class="{ mergebar: row.cloud && mergingTaskId === row.id }">
+          <i :style="{ width: (row.cloud && mergingTaskId === row.id ? merging : progress(row)) + '%' }" />
         </div>
-        <div v-if="mergingTaskId === t.taskId" class="mergelabel">合并中 {{ merging }}%</div>
-        <div v-if="t.error" class="banner error" style="margin-top: 8px">{{ t.error }}</div>
+        <div v-if="row.cloud && mergingTaskId === row.id" class="mergelabel">合并中 {{ merging }}%</div>
+        <div v-if="row.error" class="banner error" style="margin-top: 8px">{{ row.error }}</div>
       </div>
     </template>
 
@@ -665,13 +806,16 @@ onUnmounted(() => {
     <div v-if="removeAllOpen" class="mask" @click.self="removeAllOpen = false">
       <div class="dlg">
         <h3 style="margin: 0 0 6px">删除全部任务？</h3>
-        <p class="hint">将从下载列表移除全部 {{ tasks.length }} 个任务（不含批量任务批次）</p>
+        <p class="hint">
+          将从下载列表移除全部 {{ rows.length }} 个任务（网盘 {{ tasks.length }} · 普通 {{ normalTasks.length }}，
+          不含批量任务批次）；普通下载任务不删本地文件，「同时删除本地文件」仅对云盘任务生效
+        </p>
         <div class="row" style="margin-bottom: 12px">
-          <span class="ck" :class="{ on: removeAllDeleteLocal }" title="同时删除本地文件"
+          <span class="ck" :class="{ on: removeAllDeleteLocal }" title="同时删除本地文件（仅云盘任务）"
                 @click="removeAllDeleteLocal = !removeAllDeleteLocal">
             <AppIcon v-if="removeAllDeleteLocal" name="check" :size="13" />
           </span>
-          <span>同时删除本地文件</span>
+          <span>同时删除本地文件（仅云盘任务）</span>
         </div>
         <div class="row end">
           <button class="btn text small" @click="removeAllOpen = false">取消</button>
@@ -799,6 +943,8 @@ onUnmounted(() => {
 .grouphdr { padding: 2px 4px; gap: 8px; }
 .gdir { font-size: 12.5px; color: var(--on-bg-variant); font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 普通任务来源徽标（跟在文件名后，aria2-next / FTP） */
+.engchip { margin-left: 6px; font-size: 11px; padding: 1px 8px; vertical-align: 1px; }
 .ck { width: 18px; height: 18px; border-radius: 4px; border: 2px solid var(--outline);
   cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center;
   color: var(--on-primary); }

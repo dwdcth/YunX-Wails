@@ -102,6 +102,126 @@ export async function downloadGetLink(taskId: number):
   return call('download_get_link', { taskId })
 }
 
+// ---- 普通下载（NormalDownload* bindings：HTTP/磁力/BT/ed2k/Metalink → aria2-next；FTP → Go 内置）----
+// 任务存独立库 <dataDir>/downloads.db（与网盘任务分家）；网盘直链仍走上面的内置分片引擎。
+
+/** 普通下载任务（字段名与 Go 侧 downloadd.Task 的 json tag 一一对应） */
+export interface NormalTask {
+  id: number
+  engine: string // "aria2" | "ftp"
+  gid: string
+  url: string
+  name: string
+  saveDir: string
+  savePath: string
+  size: number
+  downloaded: number
+  progress: number // 0-100（Go 侧算好）
+  speed: number // B/s
+  status: string // pending | active | paused | done | error
+  err: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 普通任务 status 文案（对齐云盘任务 statusText 口径） */
+export const NORMAL_STATUS_TEXT: Record<string, string> = {
+  pending: '排队中', active: '下载中', paused: '已暂停', done: '已完成', error: '失败',
+}
+
+/** 普通任务 status → 云盘任务状态码（DownloadTask.status 0等待 1下载中 2已暂停 3已完成 4失败），
+ *  下载页合并列表复用同一套状态样式 */
+export function normalStatusCode(s: string): number {
+  if (s === 'active') return 1
+  if (s === 'paused') return 2
+  if (s === 'done') return 3
+  if (s === 'error') return 4
+  return 0 // pending / 未知
+}
+
+export interface NormalSubmitResult {
+  ok: boolean
+  taskId?: number
+  taskIds?: number[] // metalink 多文件展开时有多条
+  engine?: string
+  name?: string
+  error?: string
+}
+
+export async function normalDownloadSubmit(source: string, saveDir = ''): Promise<NormalSubmitResult> {
+  return JSON.parse(await CoreService.NormalDownloadSubmit(source, saveDir))
+}
+
+export interface NormalListResult { ok: boolean; tasks?: NormalTask[]; error?: string }
+
+export async function normalDownloadList(): Promise<NormalListResult> {
+  return JSON.parse(await CoreService.NormalDownloadList())
+}
+
+export interface NormalOpResult { ok: boolean; error?: string }
+
+export function normalDownloadPause(id: number): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadPause(id))
+}
+
+export function normalDownloadResume(id: number): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadResume(id))
+}
+
+/** 移除任务（不删已下载文件——对齐云盘 remove 语义） */
+export function normalDownloadRemove(id: number): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadRemove(id))
+}
+
+export function normalDownloadPauseAll(): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadPauseAll())
+}
+
+export function normalDownloadResumeAll(): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadResumeAll())
+}
+
+export function normalDownloadRemoveAll(): Promise<NormalOpResult> {
+  return JSON.parse(CoreService.NormalDownloadRemoveAll())
+}
+
+/** aria2 引擎状态（found=false 表示本机找不到 aria2-next，设置页引导配置 aria2Path） */
+export interface Aria2StatusInfo {
+  ok: boolean
+  found?: boolean
+  running?: boolean
+  version?: string
+  port?: number
+  binPath?: string
+  error?: string
+}
+
+export async function aria2Status(): Promise<Aria2StatusInfo> {
+  return JSON.parse(await CoreService.Aria2Status())
+}
+
+/** aria2Path 的核心 kv 键（后端读取优先级 kv > env YUNX_ARIA2_BIN > PATH > tools 目录） */
+export const ARIA2_PATH_KEY = 'settings.aria2Path'
+
+/**
+ * 普通下载链接识别（解析页/下载页分流用，规则对齐后端 downloadd.Classify）：
+ * ftp(s)/magnet/ed2k/bc1 前缀，或 http(s) URL / 本地路径以 .torrent/.metalink/.meta4 结尾。
+ * 纯 http(s) 直链不在内（解析页对那种先问用户，不自动提交）。
+ */
+export function isNormalDownloadLink(v: string): boolean {
+  const s = v.trim()
+  if (!s) return false
+  const lower = s.toLowerCase()
+  if (/^(ftp|ftps|magnet|ed2k|bc1):/.test(lower)) return true
+  if (/^https?:\/\//.test(lower)) {
+    const path = lower.replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]
+    return /\.(torrent|metalink|meta4)$/.test(path)
+  }
+  // 无 scheme：按本地文件路径对待（WebKit 下 file input 拿不到原生路径，手填路径由后端 os.Stat 兜底）
+  if (/^[a-z][a-z0-9+.-]*:/.test(lower)) return false // 其它 scheme（thunder:// 等）不支持
+  return /\.(torrent|metalink|meta4)$/.test(lower.split(/[?#]/)[0])
+}
+
 // ---- 下载调试（对齐原版 DownloadDebugScreen；设置开 downloadDebug 后行菜单出现入口）----
 
 /** 单个在飞分片（= 一个 worker 此刻在干什么），字段与 core ChunkDebug 一一对应 */
