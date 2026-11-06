@@ -158,6 +158,14 @@ object DllFacade {
         // 「储存目录」搬迁后旧位置残留清理（storage_migrate_db 记下的待清理标记在这里消费）。
         // 失败不阻断（目录不可写等场景核心仍能响应纯设置命令）。
         runCatching { AppContext.init() }
+        // 迅雷设备指纹加载（对齐桌面 Main.kt:124）：从 xunlei_fp prefs 恢复持久指纹，
+        // 不接的话每次进程重启指纹都会重新生成，登录风控更严
+        runCatching { com.yunx.app.data.network.XunleiDeviceFingerprint.init() }
+        // 光鸭设备指纹（对齐桌面 MainScreen:321）：guangyaApi↔guangyaAccount 互相 lazy，
+        // 在两侧都构造后接线，避免循环初始化
+        runCatching {
+            ResolveGateway.guangyaApi.deviceIdProvider = { ResolveGateway.guangyaAccount.cachedDeviceId() }
+        }
         // 迅雷 access_token 过期自动刷新（对齐桌面 MainScreen:487）：401 时用 refresh_token
         // 换新并落库。★ 之前 DLL 漏接这条线，导入的账号 token 一过期就「帐号认证失败」。
         runCatching {
@@ -249,7 +257,11 @@ object DllFacade {
             }
         }.apply { isDaemon = true; name = "announce-refresh" }.start()
     }
-    private val githubApi by lazy { com.yunx.app.data.network.GitHubApi() }
+    // GitHub API 带 token（对齐桌面 MainScreen:277）：有 token 限流 5000/h（匿名 60/h）
+    private val githubApi by lazy {
+        com.yunx.app.data.network.GitHubApi(
+            tokenProvider = { runCatching { com.yunx.app.data.network.GitHubTokenStore.getToken() }.getOrNull() })
+    }
 
     /**
      * 批量下载（share_folder_download）的后台作用域：SupervisorJob 保证单个批次协程失败不波及其他批次，

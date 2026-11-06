@@ -103,7 +103,15 @@ object ResolveGateway {
             accountProvider = { xunleiAccount.getAccount()?.accessToken },
             deviceIdProvider = { xunleiAccount.getAccount()?.deviceId },
             captchaProvider = { xunleiAccount.getAccount()?.captchaToken },
-            refreshProvider = null,
+            // token 过期时 401 降级刷新（对齐桌面 MainScreen:584；与 DllFacade init 接的
+            // API 级 refreshTokenProvider 是两层互补：仓库层供取链前主动刷新）
+            refreshProvider = {
+                val acc = xunleiAccount.getAccount()
+                if (acc == null || acc.refreshToken.isBlank()) null
+                else xunleiApi.refreshToken(acc.refreshToken, acc.deviceId, acc.authType)?.also { (at, nrt) ->
+                    xunleiAccount.updateTokens(at, nrt)
+                }
+            },
         )
     }
 
