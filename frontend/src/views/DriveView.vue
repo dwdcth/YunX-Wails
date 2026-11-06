@@ -3,7 +3,8 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   accountRemove, accountSetPrimary, accountSetRemark, accountsList,
-  cloudDelete, cloudDownload, cloudList, cloudMkdir, cloudMove, cloudQuota, cloudRename,
+  cloudDelete, cloudDownload, cloudLink, cloudList, cloudMkdir, cloudMove, cloudQuota, cloudRename,
+  isPreviewableVideo,
   cloudShare, fmtBytes, type AccountEntry, type CloudQuota, type ShareFile,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
@@ -177,6 +178,31 @@ async function reloadCurrent() {
   if (r?.ok && r.files) files.value = r.files
 }
 
+// ---- 云盘视频/音频在线预览（cloud_link 取直链 → <video> 原生播放）----
+
+const previewUrl = ref('')
+const previewName = ref('')
+const previewBusy = ref(false)
+
+async function doPreview(f: ShareFile) {
+  if (!browsing.value || previewBusy.value) return
+  previewBusy.value = true
+  error.value = ''
+  try {
+    const r = await cloudLink(browsing.value, f)
+    if (r.ok && r.url) {
+      previewUrl.value = r.url
+      previewName.value = r.filename || f.fname
+    } else {
+      error.value = r.error ?? '取直链失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    previewBusy.value = false
+  }
+}
+
 /** 多选创建分享：cloud_share → toast 显示 shareUrl 并尝试写剪贴板 */
 async function doShare() {
   if (!browsing.value || !selFiles.value.length || sharing.value) return
@@ -323,6 +349,8 @@ onMounted(() => {
           <template v-else>
             <span class="fname" @click="f.isdir && openDir(f.fid, f.fname)">{{ f.fname }}</span>
             <span class="fmeta">{{ f.isdir ? '目录' : fmtBytes(f.fsize) }}</span>
+            <button v-if="!f.isdir && isPreviewableVideo(f.fname)" class="btn text small"
+                    :disabled="previewBusy" title="在线播放" @click="doPreview(f)">预览</button>
             <button v-if="!f.isdir && platformMeta.canDl" class="btn tonal small" @click="doDownload(f)">下载</button>
             <button class="btn text small" @click="renaming = f; renameText = f.fname">重命名</button>
             <button class="btn text small" @click="moving = f">移动</button>
@@ -333,6 +361,18 @@ onMounted(() => {
       <DirPickerModal v-if="moving" :platform="browsing" title="移动到哪个文件夹？"
                       @confirm="doMove" @cancel="moving = null" />
     </template>
+
+    <!-- 云盘视频预览：CDN 直链 + 原生播放器（需鉴权头的平台可能播不了，尽力而为） -->
+    <div v-if="previewUrl" class="preview-mask" @click.self="previewUrl = ''">
+      <div class="preview-box">
+        <div class="preview-bar">
+          <b>{{ previewName }}</b>
+          <button class="btn text small" style="margin-left: auto" @click="previewUrl = ''">关闭</button>
+        </div>
+        <video :key="previewUrl" :src="previewUrl" controls autoplay
+               style="width: 100%; height: calc(100% - 44px); background: #000" />
+      </div>
+    </div>
 
     <!-- 卡片网格模式 -->
     <template v-else>
@@ -425,4 +465,13 @@ onMounted(() => {
   padding: 2px 6px; border-radius: 6px; font-size: 13px; }
 .crumb:disabled { color: var(--on-bg); font-weight: 600; }
 .sep { color: var(--outline); }
+/* 云盘视频预览覆盖层 */
+.preview-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: flex;
+  align-items: center; justify-content: center; z-index: 60; }
+.preview-box { width: min(88vw, 1100px); height: min(78vh, 720px); display: flex;
+  flex-direction: column; background: var(--surface, #1e1e1e); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5); }
+.preview-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; height: 44px;
+  box-sizing: border-box; }
+.preview-bar b { flex: 1; font-size: 14px; }
 </style>

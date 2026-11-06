@@ -933,6 +933,25 @@ object DllFacade {
                     resp.put("taskId", taskId).put("filename", link.filename).put("size", link.size)
                 }
 
+                "cloud_link" -> {
+                    // 云盘文件直链（预览用，不入队）：与 cloud_download 同一条取链路径。
+                    // 浏览器 <video> 无法带自定义请求头——夸克/UC 的 CDN 签名直链可独立播放；
+                    // 需要鉴权头的平台（C139 等）浏览器可能播不了，属尽力而为。
+                    val plat = platformOf(req.getString("platform"))
+                        ?: return error("未知平台").toString()
+                    val file = ShareFile(
+                        fid = req.getString("fid"),
+                        fname = req.optString("fname"),
+                        fsize = req.optLong("fsize", -1L), isdir = false,
+                        pdirFid = "", fidToken = req.optString("fidToken"),
+                    )
+                    val link = runBlocking { CloudGateway.downloadLink(plat, file) }
+                        ?: return error("取直链失败（账号可能未登录或链接已过期）").toString()
+                    val cred = runBlocking { ResolveGateway.credentialFor(plat) }
+                    val finalUrl = ResolveGateway.fastestUrl(plat, link.downloadUrl, cred)
+                    resp.put("url", finalUrl).put("filename", link.filename).put("size", link.size)
+                }
+
                 "share_transfer" -> {
                     val plat = ResolveGateway.platform
                         ?: return error("尚未解析任何分享").toString()

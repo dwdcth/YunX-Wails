@@ -742,3 +742,17 @@ export function fmtRemain(ms: number): string {
   if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`
   return `${Math.floor(s / 3600)} 时 ${Math.floor((s % 3600) / 60)} 分`
 }
+
+/** 云盘文件直链（预览用，不入队）：返回 CDN 直链，浏览器 <video> 直接播放 */
+export async function cloudLink(platform: string, f: { fid: string; fname: string; fsize?: number; fidToken?: string }) {
+  return call<{ ok: boolean; url?: string; filename?: string; size?: number; error?: string }>('cloud_link', {
+    platform, fid: f.fid, fname: f.fname, fsize: f.fsize, fidToken: f.fidToken ?? '',
+  })
+}
+
+/** 预览可播的视频扩展名（浏览器原生 <video> 尽力而为） */
+export const VIDEO_EXTS = ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'flv', 'ts', 'mp3', 'm4a', 'flac', 'ogg']
+export function isPreviewableVideo(name: string): boolean {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+  return VIDEO_EXTS.includes(ext)
+}
