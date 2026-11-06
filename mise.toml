@@ -1,0 +1,14 @@
+# YunX-Desktop 工具链（文档要求：JDK17 toolchain + Gradle 8.13 + GraalVM 21 + Go 1.26+ + Wails v3）
+# 详见 HANDOFF.md §7 / dll/windows-dll-kit/README.md
+[tools]
+# 与 gradle/wrapper/gradle-wrapper.properties 锁定的 8.13 一致
+gradle = "8.13.0"
+# 前者为 Gradle toolchain 用的 JDK17；后者编 DLL。
+# ★ GraalVM 用 25.0.5（Oracle GraalVM LTS）：21.0.2 的 points-to 分析在 DownloadManager 上撞
+#   "mismatch in rethrowException flag" 编译器 bug（oracle/graal#10610，2025-02 修复，21.0.2 早于修复）；
+#   25 还需 -H:MaxDuplicationFactor=100（见巡检自动化的重建命令）。
+java = ["temurin-17", "oracle-graalvm-25.0.5"]
+# go.mod 要求 go 1.26+（解析到已装的 1.27.3）
+go = "1.27"
+# Wails v3 CLI，版本与 go.mod 的 wails/v3 v3.0.0 对齐
+"go:github.com/wailsapp/wails/v3/cmd/wails3" = "v3.0.0"

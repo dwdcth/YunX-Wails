@@ -1,0 +1,44 @@
+# ================= YunX-Wails .gitignore =================
+# 注意：gitignore 不支持行尾注释，说明一律写在独立注释行。
+# 原则：凡是从网络/本机可再生的产物一律忽略；保留源码 + 构建配置。
+
+# ---- Gradle 构建缓存与产物（含 core/build、dll/build 及子模块各自 build）----
+.gradle/
+.gradle-home/
+.kotlin/
+build/
+
+# ---- Go / Wails ----
+# 主程序二进制输出目录
+bin/
+# go-loader 冒烟加载器编译产物
+dll/go-loader/loader
+# 前端依赖与构建产物（npm install && npm run build 再生；dist 由 go:embed 引用）
+frontend/node_modules/
+frontend/dist/
+
+# ---- 打包 / 临时 / 本机环境 ----
+release/
+.tmp/
+.test-data/
+trust/
+LOG/
+*.log
+hs_err_pid*
+yunx_log_*.txt
+
+# ---- IDE / 系统文件 ----
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+.trae/
+Temp/
+
+# native-image-agent 原始输出草稿（正本在 dll/src/main/resources/META-INF/native-image）
+dll/ni-meta/
+
+# ================= 重要：以下必须保留，不要忽略 =================
+# gradle/wrapper/ + gradle.properties —— Gradle 构建配置，必须提交。
+# frontend/bindings/ —— wails3 生成的服务绑定，前端依赖，必须提交。

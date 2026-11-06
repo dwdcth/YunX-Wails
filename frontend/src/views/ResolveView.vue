@@ -1,0 +1,536 @@
+<script setup lang="ts">
+// 解析页：对齐原版 ResolveScreen + ShareDetailScreen 的主流程。
+// share_resolve 建会话并返回根目录 → share_list 翻目录 → share_download 取直链入队下载（带平台请求头）。
+// GitHub releases 链接走 github_resolve 分支；目录行支持「下载整个文件夹」（share_folder_download 批量入队）。
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import {
+  bookmarkAdd, downloadSubmit, fmtBytes, githubDownload, githubResolve, linkHistoryClear,
+  linkHistoryDelete, linkHistoryList, shareDownload, shareFolderDownload, shareLink, shareList,
+  shareResolve, shareTransfer, shareTransferBatch,
+  type GithubAsset, type LinkHistoryItem, type ShareDetail, type ShareFile,
+} from '../core'
+import AppIcon from '../components/AppIcon.vue'
+import DirPickerModal from '../components/DirPickerModal.vue'
+import { Events } from '/wails/runtime.js'
+
+const link = ref('')
+const pwd = ref('')
+const loading = ref(false)
+const error = ref('')
+
+const router = useRouter()
+
+const detail = ref<ShareDetail | null>(null)
+const dirStack = ref<{ fid: string; name: string }[]>([])
+const listLoading = ref(false)
+const toast = ref('')
+
+const history = ref<LinkHistoryItem[]>([])
+const transferring = ref<ShareFile | null>(null)
+
+// GitHub Release 详情（命中 github.com/<owner>/<repo>/releases 时替代网盘分享详情）
+const gh = ref<{ url: string; repo: string; tag: string; assets: GithubAsset[] } | null>(null)
+
+// 剪贴板分享链接建议（Go 宿主事件，对齐原版 ClipboardLinkPopup）
+const clipboardLink = ref('')
+
+// GitHub releases 页链接（owner/repo 两段路径）
+const GITHUB_RE = /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/releases/i
+
+// 视频链接分流（对齐原版 VideoLinkParser.looksLikeVideoLink）：命中即跳视频解析页
+const VIDEO_DOMAINS = ['bilibili.com', 'b23.tv', 'xiaohongshu.com', 'xhslink.com', 'kuaishou.com', 'weibo.com', 'weibo.cn', 'acfun.cn', 'pixiv.net']
+
+function isVideoLink(v: string): boolean {
+  return VIDEO_DOMAINS.some((d) => v.includes(d))
+}
+
+function useClipboardLink() {
+  const v = clipboardLink.value
+  clipboardLink.value = ''
+  link.value = v
+  parse(v)
+}
+
+/** 剪贴板命中视频域名：跳视频页接力解析（Go 侧剪贴板事件不区分类型，前端补偿分流） */
+function useClipboardVideo() {
+  const v = clipboardLink.value
+  clipboardLink.value = ''
+  localStorage.setItem('yunx.pendingVideo', v)
+  router.push('/video')
+}
+
+
+async function doTransfer(targetFid: string) {
+  const f = transferring.value
+  if (!f || !detail.value) return
+  transferring.value = null
+  try {
+    const r = await shareTransfer(f, targetFid)
+    flash(r.ok ? `「${f.fname}」已转存` : `转存失败：${r.error}`)
+  } catch (e) {
+    flash(`转存失败：${e}`)
+  }
+}
+
+// ---- 直链弹窗（share_link 现取直链，可手动选目录后 download_submit 入队）----
+
+const linkInfo = ref<{ f: ShareFile; url: string; filename: string; size: number; isHls: boolean } | null>(null)
+const linkSaveDir = ref('')
+const linkBusy = ref(false)
+const linkError = ref('')
+
+async function openLinkDialog(f: ShareFile) {
+  if (linkBusy.value) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    const r = await shareLink(f)
+    if (r.ok && r.url) {
+      linkInfo.value = {
+        f, url: r.url, filename: r.filename || f.fname,
+        size: r.size || f.fsize, isHls: !!r.isHls,
+      }
+      linkSaveDir.value = ''
+    } else {
+      error.value = r.error ?? '取直链失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+async function copyDirectLink() {
+  if (!linkInfo.value) return
+  // 复制失败（如非安全上下文）只影响剪贴板，URL 仍展示在弹窗输入框里
+  try {
+    await navigator.clipboard.writeText(linkInfo.value.url)
+    flash('直链已复制')
+  } catch {
+    flash('复制失败，请手动选择输入框内容复制')
+  }
+}
+
+async function downloadViaLink() {
+  if (!linkInfo.value || linkBusy.value) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    const r = await downloadSubmit(linkInfo.value.url, linkInfo.value.filename, linkSaveDir.value.trim())
+    if (r.ok) {
+      flash(`「${linkInfo.value.filename}」已加入下载（任务 #${r.taskId}），进度见下载页`)
+      linkInfo.value = null
+    } else {
+      linkError.value = r.error ?? '下载失败'
+    }
+  } catch (e) {
+    linkError.value = String(e)
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+// ---- 多选批量转存（复选框与下载页/网盘页同款 .ck 样式）----
+
+const selected = ref(new Set<string>())
+const batchTransferring = ref(false)
+const batchBusy = ref(false)
+
+const selFiles = computed(() => detail.value?.files.filter((f) => selected.value.has(f.fid)) ?? [])
+
+function toggleSel(fid: string) {
+  if (selected.value.has(fid)) selected.value.delete(fid)
+  else selected.value.add(fid)
+}
+
+async function doBatchTransfer(targetFid: string) {
+  const files = selFiles.value
+  batchTransferring.value = false
+  if (!files.length || batchBusy.value) return
+  batchBusy.value = true
+  const r = await shareTransferBatch(files, targetFid)
+  batchBusy.value = false
+  selected.value.clear()
+  flash(r.failCount === 0
+    ? `已转存 ${r.okCount} 个文件`
+    : `转存完成：成功 ${r.okCount} · 失败 ${r.failCount}${r.lastError ? `（${r.lastError}）` : ''}`)
+}
+
+/** 文件夹批量下载：整目录入队为一个批次，进度见下载页「批量任务」卡 */
+async function downloadFolder(f: ShareFile) {
+  try {
+    const r = await shareFolderDownload(f.fid, f.fname)
+    if (r.ok) flash(`文件夹「${f.fname}」已创建批量任务（批次 ${r.batchId ?? ''}），进度见下载页`)
+    else error.value = r.error ?? '批量下载失败'
+  } catch (e) {
+    error.value = String(e)
+  }
+}
+
+async function refreshHistory() {
+  try { history.value = await linkHistoryList() } catch { /* 网络外错误忽略 */ }
+}
+
+function flash(msg: string) {
+  toast.value = msg
+  setTimeout(() => (toast.value = ''), 2600)
+}
+
+/** GitHub 分支：github_resolve 列出 Release 附件，跳过 share_resolve */
+async function parseGithub(url: string) {
+  gh.value = null
+  try {
+    const r = await githubResolve(url)
+    if (r.ok) {
+      gh.value = { url, repo: r.repo ?? '', tag: r.tag ?? '', assets: r.assets ?? [] }
+      flash(`GitHub Release：${gh.value.repo} ${gh.value.tag} · ${gh.value.assets.length} 个附件`)
+    } else {
+      error.value = r.error ?? 'GitHub 解析失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  }
+}
+
+async function parse(text?: string, pwdOverride?: string) {
+  const url = (text ?? link.value).trim()
+  // 自动从文案提取提取码（对齐原版 ResolveScreen:192-196）
+  if (!pwd.value.trim()) {
+    const m = url.match(/提取码[:：\s]*([a-zA-Z0-9]{4})/)
+    if (m) pwd.value = m[1]
+  }
+  const p = (pwdOverride ?? pwd.value).trim()
+  if (!url || loading.value) return
+  // 视频链接分流（对齐原版 VideoLinkParser.looksLikeVideoLink）：视频页经 pendingVideo 接力自动解析
+  if (isVideoLink(url)) {
+    localStorage.setItem('yunx.pendingVideo', url)
+    router.push('/video')
+    return
+  }
+  loading.value = true
+  error.value = ''
+  detail.value = null
+  gh.value = null
+  try {
+    // GitHub releases 链接：走 github_resolve，不走网盘分享会话
+    if (GITHUB_RE.test(url)) {
+      await parseGithub(url)
+      return
+    }
+    const r = await shareResolve(url, p)
+    if (!r.ok) {
+      error.value = r.error ?? '解析失败'
+    } else {
+      detail.value = r
+      dirStack.value = [{ fid: r.dirFid, name: r.title || '根目录' }]
+      refreshHistory()
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** GitHub 附件下载：url 传 Release 页链接（与 github_resolve 同参），fileName 取附件名 */
+async function ghDownload(a: GithubAsset) {
+  if (!gh.value) return
+  try {
+    const r = await githubDownload(gh.value.url, a.name)
+    if (r.ok) flash(`「${a.name}」已加入下载（任务 #${r.taskId}），进度见下载页`)
+    else error.value = r.error ?? '下载失败'
+  } catch (e) {
+    error.value = String(e)
+  }
+}
+
+async function openDir(f: ShareFile) {
+  if (!detail.value || listLoading.value) return
+  listLoading.value = true
+  selected.value.clear() // 换目录后旧选择失效
+  try {
+    const r = await shareList(f.fid)
+    if (r.ok && r.files) {
+      detail.value.files = r.files
+      dirStack.value.push({ fid: f.fid, name: f.fname })
+    } else {
+      error.value = r.error ?? '进入目录失败'
+    }
+  } finally {
+    listLoading.value = false
+  }
+}
+
+async function backTo(level: number) {
+  // level = 目标层（0=根）；与原版 goBack/navigateToLevel 对应
+  if (!detail.value || listLoading.value || level >= dirStack.value.length - 1) {
+    if (level >= dirStack.value.length - 1) return
+  }
+  listLoading.value = true
+  selected.value.clear() // 换目录后旧选择失效
+  try {
+    const target = dirStack.value[level]
+    const r = await shareList(target.fid)
+    if (r.ok && r.files) {
+      detail.value.files = r.files
+      dirStack.value = dirStack.value.slice(0, level + 1)
+    }
+  } finally {
+    listLoading.value = false
+  }
+}
+
+async function download(f: ShareFile) {
+  try {
+    const r = await shareDownload(f)
+    if (r.ok) {
+      flash(`「${r.filename}」已加入下载（任务 #${r.taskId}），进度见下载页`)
+    } else {
+      error.value = r.error ?? '下载失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  }
+}
+
+async function saveBookmark() {
+  if (!detail.value) return
+  try {
+    await bookmarkAdd(link.value.trim() || location.hash, detail.value.title, detail.value.platform, pwd.value.trim())
+    flash('已收藏')
+  } catch (e) {
+    flash(`收藏失败：${e}`)
+  }
+}
+
+async function useHistory(h: LinkHistoryItem) {
+  link.value = h.url
+  pwd.value = h.pwd
+  parse(h.url, h.pwd)
+}
+
+// 书签页「重解析」的接力：取 pendingResolve 自动填链并解析
+async function checkPendingResolve() {
+  const pending = localStorage.getItem('yunx.pendingResolve')
+  if (!pending) return
+  localStorage.removeItem('yunx.pendingResolve')
+  link.value = pending
+  parse(pending)
+}
+
+onMounted(() => {
+  refreshHistory()
+  checkPendingResolve()
+})
+
+// 剪贴板事件订阅（同一链接只提示一次）
+let lastClip = ''
+Events.On('clipboard:link', (data: unknown) => {
+  const link = typeof data === 'string' ? data : String((data as { data?: string })?.data ?? '')
+  if (!link || link === lastClip) return
+  lastClip = link
+  clipboardLink.value = link
+  setTimeout(() => (clipboardLink.value = ''), 30_000)
+})
+</script>
+
+<template>
+  <div class="page">
+    <div class="card">
+      <h3>解析分享链接</h3>
+      <p class="hint">支持夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云（优享版），未登录也可解析与部分平台下载</p>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div class="row">
+          <div class="field" style="flex: 1; min-width: 260px">
+            <label>分享链接</label>
+            <input v-model="link" class="input" placeholder="https://pan.quark.cn/s/xxxxxxxx"
+                   @keydown.enter="parse()" />
+          </div>
+          <button class="btn" style="align-self: flex-end" :disabled="!link.trim() || loading"
+                  @click="parse()">
+            {{ loading ? '解析中…' : '解析' }}
+          </button>
+        </div>
+        <div class="row">
+          <div class="field" style="flex: 1; min-width: 160px">
+            <label>提取码（文案里自带则不用填）</label>
+            <input v-model="pwd" class="input" placeholder="如 a1b2" @keydown.enter="parse()" />
+          </div>
+        </div>
+      </div>
+      <div v-if="toast" class="banner" style="margin-top: 10px">{{ toast }}</div>
+      <div v-if="clipboardLink && isVideoLink(clipboardLink)" class="row banner" style="margin-top: 10px; gap: 8px">
+        <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+              :title="clipboardLink">📋 剪贴板检测到视频链接：{{ clipboardLink }}</span>
+        <button class="btn tonal small" @click="useClipboardVideo">去视频页解析</button>
+        <button class="btn text small" @click="clipboardLink = ''">忽略</button>
+      </div>
+      <div v-else-if="clipboardLink" class="row banner" style="margin-top: 10px; gap: 8px">
+        <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+              :title="clipboardLink">📋 剪贴板检测到分享链接：{{ clipboardLink }}</span>
+        <button class="btn tonal small" @click="useClipboardLink">解析它</button>
+        <button class="btn text small" @click="clipboardLink = ''">忽略</button>
+      </div>
+    </div>
+
+    <div v-if="error" class="banner error">{{ error }}</div>
+
+    <!-- GitHub Release 详情（github_resolve 分支，替代网盘分享详情） -->
+    <div v-if="gh" class="card">
+      <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+        <div class="row" style="gap: 8px">
+          <span class="chip">github</span>
+          <b style="font-size: 15px">{{ gh.repo }}</b>
+          <span class="chip plain">{{ gh.tag }}</span>
+        </div>
+        <button class="btn text small" @click="gh = null">关闭</button>
+      </div>
+      <div v-if="gh.assets.length === 0" class="empty"><p>该 Release 没有附件</p></div>
+      <div v-for="a in gh.assets" :key="a.url" class="filerow">
+        <span class="ficon"><AppIcon name="file" /></span>
+        <span class="fname" :title="a.name">{{ a.name }}</span>
+        <span class="fmeta">{{ fmtBytes(a.size) }}</span>
+        <button class="btn tonal small" @click="ghDownload(a)">下载</button>
+      </div>
+    </div>
+
+    <div v-if="detail" class="card">
+      <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+        <div class="row" style="gap: 8px">
+          <span class="chip">{{ detail.platform }}</span>
+          <b style="font-size: 15px">{{ detail.title }}</b>
+          <span v-if="detail.guest" class="chip plain">游客模式</span>
+        </div>
+        <span class="row">
+          <button class="btn text small" @click="saveBookmark">收藏</button>
+          <button class="btn text small" @click="detail = null">关闭</button>
+        </span>
+      </div>
+
+      <div class="row crumbs" style="margin: 6px 0 10px">
+        <template v-for="(d, i) in dirStack" :key="d.fid + i">
+          <button class="crumb" :disabled="i === dirStack.length - 1" @click="backTo(i)">
+            {{ d.name || '根目录' }}
+          </button>
+          <span v-if="i < dirStack.length - 1" class="sep">/</span>
+        </template>
+      </div>
+
+      <!-- 多选批量栏：勾选任意文件后出现 -->
+      <div v-if="selected.size > 0" class="row" style="justify-content: space-between; margin-bottom: 10px">
+        <span style="font-weight: 600">已选 {{ selected.size }} 项</span>
+        <span class="row">
+          <button class="btn tonal small" :disabled="batchBusy" @click="batchTransferring = true">批量转存</button>
+          <button class="btn text small" @click="selected.clear()">取消选择</button>
+        </span>
+      </div>
+
+      <div v-if="listLoading" class="banner">加载目录…</div>
+      <div v-else-if="detail.files.length === 0" class="empty">
+        <p>目录为空</p>
+      </div>
+      <div v-for="f in detail.files" :key="f.fid" class="filerow">
+        <span class="ck" :class="{ on: selected.has(f.fid) }" title="选中" @click="toggleSel(f.fid)">
+          <AppIcon v-if="selected.has(f.fid)" name="check" :size="13" />
+        </span>
+        <span class="ficon"><AppIcon :name="f.isdir ? 'cloud' : 'file'" /></span>
+        <span class="fname" :title="f.fname" @click="f.isdir && openDir(f)">{{ f.fname }}</span>
+        <span class="fmeta">{{ f.isdir ? '目录' : fmtBytes(f.fsize) }}</span>
+        <template v-if="f.isdir">
+          <button class="btn text small" @click="openDir(f)">打开</button>
+          <button class="btn tonal small" @click="downloadFolder(f)">下载整个文件夹</button>
+        </template>
+        <template v-else>
+          <button class="btn tonal small" @click="download(f)">下载</button>
+          <button class="btn text small" :disabled="linkBusy" title="取直链（可复制或手动选目录下载）"
+                  @click="openLinkDialog(f)">直链</button>
+          <button class="btn text small" @click="transferring = f">转存</button>
+        </template>
+      </div>
+    </div>
+
+    <DirPickerModal v-if="transferring && detail" :platform="detail.platform.toLowerCase()"
+                    title="转存到哪个文件夹？" @confirm="doTransfer" @cancel="transferring = null" />
+    <DirPickerModal v-else-if="batchTransferring && detail" :platform="detail.platform.toLowerCase()"
+                    title="批量转存到哪个文件夹？" @confirm="doBatchTransfer" @cancel="batchTransferring = false" />
+
+    <!-- 直链弹窗：share_link 现取直链，可复制或手动选目录入队 -->
+    <div v-if="linkInfo" class="mask" @click.self="linkInfo = null">
+      <div class="dlg">
+        <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+          <h3 style="margin: 0">直链下载</h3>
+          <button class="btn text small" @click="linkInfo = null">关闭</button>
+        </div>
+        <p class="hint" style="margin-bottom: 10px">
+          {{ linkInfo.filename }} · {{ fmtBytes(linkInfo.size) }}
+          <span v-if="linkInfo.isHls" class="chip plain" style="margin-left: 6px">HLS</span>
+        </p>
+        <div class="row" style="margin-bottom: 12px; gap: 8px">
+          <input class="input" style="flex: 1; min-width: 0" :value="linkInfo.url" readonly
+                 @focus="($event.target as HTMLInputElement).select()" />
+          <button class="btn tonal small" @click="copyDirectLink">复制</button>
+        </div>
+        <div class="field" style="margin-bottom: 12px">
+          <label>保存目录（空 = 默认下载目录）</label>
+          <input v-model="linkSaveDir" class="input" placeholder="/home/xxx/Downloads"
+                 @keydown.enter="downloadViaLink" />
+        </div>
+        <div v-if="linkError" class="banner error" style="margin-bottom: 10px">{{ linkError }}</div>
+        <div class="row end">
+          <button class="btn" :disabled="linkBusy" @click="downloadViaLink">
+            {{ linkBusy ? '提交中…' : '加入下载' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="history.length" class="card">
+      <div class="row" style="justify-content: space-between">
+        <h3 style="margin: 0"><AppIcon name="history" :size="16" /> 解析历史（与原版互通）</h3>
+        <button class="btn text small" @click="linkHistoryClear().then(refreshHistory)">清空</button>
+      </div>
+      <div v-for="h in history" :key="h.id" class="row"
+           style="justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--outline-variant)">
+        <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 560px"
+              :title="h.url">
+          <b v-if="h.title">{{ h.title }}</b> · {{ h.url }}
+        </span>
+        <span class="row" style="flex: none">
+          <span class="chip plain">{{ h.platform }}</span>
+          <button class="btn text small" @click="useHistory(h)">重解析</button>
+          <button class="btn text small" @click="linkHistoryDelete(h.id).then(refreshHistory)">删除</button>
+        </span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.filerow { display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+  border-bottom: 1px solid var(--outline-variant); }
+.filerow:last-child { border-bottom: none; }
+.ficon { color: var(--on-bg-variant); display: flex; }
+.fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.filerow .fname { cursor: pointer; }
+.fmeta { color: var(--on-bg-variant); font-size: 12.5px; flex: none; min-width: 64px; text-align: right; }
+.crumbs { flex-wrap: wrap; }
+.crumb { border: none; background: transparent; color: var(--primary); cursor: pointer;
+  padding: 2px 6px; border-radius: 6px; font-size: 13px; }
+.crumb:disabled { color: var(--on-bg); font-weight: 600; cursor: default; }
+.crumb:not(:disabled):hover { background: var(--surface-container-high); }
+.sep { color: var(--outline); }
+
+/* 多选复选框（与下载页/网盘页同款） */
+.ck { width: 18px; height: 18px; border-radius: 4px; border: 2px solid var(--outline);
+  cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  color: var(--on-primary); }
+.ck.on { background: var(--primary); border-color: var(--primary); }
+
+/* 直链弹窗（.mask/.dlg 对齐 DirPickerModal） */
+.mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.42); display: flex;
+  align-items: center; justify-content: center; z-index: 40; }
+.dlg { background: var(--surface); border-radius: var(--radius-lg); padding: 18px 20px;
+  width: min(480px, 92vw); border: 1px solid var(--outline-variant); }
+</style>

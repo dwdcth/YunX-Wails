@@ -1,0 +1,3 @@
+[submodule "upstream/YunX-Desktop"]
+	path = upstream/YunX-Desktop
+	url = https://github.com/tidain/YunX-Desktop

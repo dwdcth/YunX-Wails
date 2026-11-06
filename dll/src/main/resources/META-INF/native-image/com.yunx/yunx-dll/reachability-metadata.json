@@ -1,0 +1,283 @@
+{
+  "reflection": [
+    {
+      "type": "byte[]",
+      "serializable": true
+    },
+    {
+      "type": "com.sun.org.apache.xerces.internal.jaxp.DocumentBuilderFactoryImpl",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "com.sun.tools.javac.api.JavacTrees",
+      "methods": [
+        {
+          "name": "instance",
+          "parameterTypes": [
+            "javax.tools.JavaCompiler$CompilationTask"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "com.sun.tools.javac.jvm.PoolConstant$LoadableConstant[]"
+    },
+    {
+      "type": "com.sun.tools.jdi.JDWP$EventKind",
+      "fields": [
+        {
+          "name": "BREAKPOINT"
+        },
+        {
+          "name": "CLASS_LOAD"
+        },
+        {
+          "name": "CLASS_PREPARE"
+        },
+        {
+          "name": "CLASS_UNLOAD"
+        },
+        {
+          "name": "EXCEPTION"
+        },
+        {
+          "name": "EXCEPTION_CATCH"
+        },
+        {
+          "name": "FIELD_ACCESS"
+        },
+        {
+          "name": "FIELD_MODIFICATION"
+        },
+        {
+          "name": "FRAME_POP"
+        },
+        {
+          "name": "METHOD_ENTRY"
+        },
+        {
+          "name": "METHOD_EXIT"
+        },
+        {
+          "name": "METHOD_EXIT_WITH_RETURN_VALUE"
+        },
+        {
+          "name": "MONITOR_CONTENDED_ENTER"
+        },
+        {
+          "name": "MONITOR_CONTENDED_ENTERED"
+        },
+        {
+          "name": "MONITOR_WAIT"
+        },
+        {
+          "name": "MONITOR_WAITED"
+        },
+        {
+          "name": "SINGLE_STEP"
+        },
+        {
+          "name": "THREAD_DEATH"
+        },
+        {
+          "name": "THREAD_END"
+        },
+        {
+          "name": "THREAD_START"
+        },
+        {
+          "name": "USER_DEFINED"
+        },
+        {
+          "name": "VM_DEATH"
+        },
+        {
+          "name": "VM_DISCONNECTED"
+        },
+        {
+          "name": "VM_INIT"
+        },
+        {
+          "name": "VM_START"
+        }
+      ]
+    },
+    {
+      "type": "com.sun.tools.jdi.SharedMemoryTransportService"
+    },
+    {
+      "type": "java.lang.Boolean",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "getBoolean",
+          "parameterTypes": [
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "java.lang.ClassLoader",
+      "fields": [
+        {
+          "name": "classLoaderValueMap"
+        }
+      ]
+    },
+    {
+      "type": "java.lang.Object"
+    },
+    {
+      "type": "java.lang.String",
+      "serializable": true
+    },
+    {
+      "type": "javax.tools.JavaCompiler$CompilationTask"
+    },
+    {
+      "type": "jdk.internal.jrtfs.JrtFileSystemProvider"
+    },
+    {
+      "type": "jdk.internal.misc.Unsafe"
+    },
+    {
+      "type": "jdk.jshell.spi.ExecutionControl$ClassBytecodes",
+      "serializable": true
+    },
+    {
+      "type": "jdk.jshell.spi.ExecutionControl$ClassBytecodes[]",
+      "serializable": true
+    },
+    {
+      "type": "sun.security.provider.NativePRNG",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.security.SecureRandomParameters"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "sun.security.provider.SHA",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData"
+    }
+  ],
+  "resources": [
+    {
+      "glob": "META-INF/services/com.sun.jdi.connect.Connector"
+    },
+    {
+      "glob": "META-INF/services/com.sun.jdi.connect.spi.TransportService"
+    },
+    {
+      "glob": "META-INF/services/com.sun.source.util.Plugin"
+    },
+    {
+      "glob": "META-INF/services/java.net.spi.InetAddressResolverProvider"
+    },
+    {
+      "glob": "META-INF/services/java.nio.file.spi.FileSystemProvider"
+    },
+    {
+      "glob": "META-INF/services/java.time.zone.ZoneRulesProvider"
+    },
+    {
+      "glob": "META-INF/services/java.util.prefs.PreferencesFactory"
+    },
+    {
+      "glob": "META-INF/services/javax.xml.parsers.DocumentBuilderFactory"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/compiler_zh.properties"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/compiler_zh_Hans.properties"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/compiler_zh_Hans_CN.properties"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/javac_zh.properties"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/javac_zh_Hans.properties"
+    },
+    {
+      "glob": "com/sun/tools/javac/resources/javac_zh_Hans_CN.properties"
+    },
+    {
+      "glob": "com/sun/tools/jdi/resources/jdi_zh.properties"
+    },
+    {
+      "glob": "com/sun/tools/jdi/resources/jdi_zh_Hans.properties"
+    },
+    {
+      "glob": "com/sun/tools/jdi/resources/jdi_zh_Hans_CN.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/compiler_zh.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/compiler_zh_Hans.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/compiler_zh_Hans_CN.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/javac_zh.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/javac_zh_Hans.properties"
+    },
+    {
+      "module": "jdk.compiler",
+      "glob": "com/sun/tools/javac/resources/javac_zh_Hans_CN.properties"
+    },
+    {
+      "module": "jdk.jdi",
+      "glob": "com/sun/tools/jdi/resources/jdi_zh.properties"
+    },
+    {
+      "module": "jdk.jdi",
+      "glob": "com/sun/tools/jdi/resources/jdi_zh_Hans.properties"
+    },
+    {
+      "module": "jdk.jdi",
+      "glob": "com/sun/tools/jdi/resources/jdi_zh_Hans_CN.properties"
+    },
+    {
+      "module": "jdk.jshell",
+      "glob": "jdk/jshell/tool/resources/DEFAULT.jsh"
+    },
+    {
+      "bundle": "com.sun.tools.javac.resources.compiler"
+    },
+    {
+      "bundle": "com.sun.tools.javac.resources.javac"
+    },
+    {
+      "bundle": "com.sun.tools.jdi.resources.jdi"
+    }
+  ]
+}
