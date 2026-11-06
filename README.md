@@ -8,7 +8,7 @@
 
 - 网盘：夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云 / 蓝奏云优享版
 - 视频：哔哩哔哩 / 小红书 / 抖音 / 微博 / 快手 / AcFun / Pixiv（DASH 自动合轨）
-- 下载：Range 分片并发 + SQLite 断点续传；磁力 / BT / ed2k 走外置引擎
+- 下载：双引擎三层分流——网盘直链走内置分片引擎（Range 并发 + SQLite 断点续传）；磁力 / BT / ed2k / Metalink / 普通 HTTP 走 aria2-next（JSON-RPC 子进程）；FTP/FTPS 走 Go 内置引擎（jlaffaye/ftp 断点续传）
 - 数据目录独立：`~/.yunx-wails/`（与原版 `~/.yunx-desktop/` 分家、可双开）；
   首次启动询问「是否从原版导入数据」（`LegacyImport*` 服务方法，不自动导入）
 
@@ -70,7 +70,21 @@ Windows：按 `dll/windows-dll-kit/README.md` 在真机编出 `yunxcore.dll` 放
 
 - 百度 / 夸克网页登录受 WAF TLS 指纹拦截（GnuTLS JA3），改用粘贴 Cookie / 密码登录；
   139 / UC / 115 网页登录正常。
-- Gopeed 外置引擎、系统托盘常驻为已知未接入项（前者按需求排除，后者受 Wails v3.0.0 API 限制）。
+- 系统托盘常驻受 Wails v3.0.0 API 限制（Gopeed 已由 aria2-next 替代，不再列为缺口）。
+
+## 普通下载引擎（aria2-next + 内置 FTP）
+
+```
+输入 → downloadd.Classify 分流
+├─ ftp:// ftps://            → Go 内置引擎（2 并发、RetrFrom 续传、三重超时防挂死）
+├─ magnet/ed2k/bc1/HTTP      → aria2-next addUri
+├─ .torrent（本地/URL/base64:内联）→ aria2-next addTorrent
+└─ .metalink/.meta4（v3 自动转 v4）→ aria2-next addMetalink
+```
+
+- aria2-next 进程惰性拉起（6900-6999 随机端口 + 随机 secret，`~/.local/share/yunx-desktop/tools/aria2-next`），崩溃自动重启；BT/DHT/Tracker/并发/限速设置经 `changeGlobalOption` 接通核心正式设置
+- 任务存独立 SQLite `<数据目录>/downloads.db`（modernc 纯 Go），与 Java 侧 yunx.db 分家；下载页双库合并展示
+- 二进制获取：[aria2-next Releases](https://github.com/AnInsomniacy/aria2-next/releases)（或设置页配置路径 kv `settings.aria2Path`）
 
 ## 上游同步
 
