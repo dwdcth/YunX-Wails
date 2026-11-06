@@ -104,6 +104,69 @@ async function confirmDownload(mode: string) {
 
 const imgBusy = ref('') // 正在入队的图片 url
 
+// ---- 图集查看器（对齐原版 ImageViewerOverlay：滚轮缩放/拖拽平移/双击复位/左右切换/Esc 关闭）----
+
+const viewerIdx = ref(-1) // -1 = 关闭
+const viewerScale = ref(1)
+const viewerOffset = ref({ x: 0, y: 0 })
+let viewerDrag: { x: number; y: number; ox: number; oy: number } | null = null
+
+function openViewer(i: number) {
+  viewerIdx.value = i
+  viewerReset()
+}
+
+function viewerReset() {
+  viewerScale.value = 1
+  viewerOffset.value = { x: 0, y: 0 }
+}
+
+function viewerMove(d: number) {
+  const n = imageMedias.value.length
+  if (!n) return
+  viewerIdx.value = (viewerIdx.value + d + n) % n
+  viewerReset()
+}
+
+function viewerZoom(ev: WheelEvent) {
+  ev.preventDefault()
+  const factor = ev.deltaY < 0 ? 1.2 : 1 / 1.2
+  const next = Math.min(12, Math.max(0.2, viewerScale.value * factor))
+  // 以鼠标为锚点：保持锚点下内容不动（对齐原版 zoomAt 线性公式）
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  const dx = ev.clientX - rect.left - rect.width / 2
+  const dy = ev.clientY - rect.top - rect.height / 2
+  const r = next / viewerScale.value
+  viewerOffset.value = {
+    x: dx - (dx - viewerOffset.value.x) * r,
+    y: dy - (dy - viewerOffset.value.y) * r,
+  }
+  viewerScale.value = next
+}
+
+function viewerPanStart(ev: PointerEvent) {
+  viewerDrag = { x: ev.clientX, y: ev.clientY, ox: viewerOffset.value.x, oy: viewerOffset.value.y }
+  ;(ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId)
+}
+
+function viewerPanMove(ev: PointerEvent) {
+  if (!viewerDrag) return
+  viewerOffset.value = {
+    x: viewerDrag.ox + ev.clientX - viewerDrag.x,
+    y: viewerDrag.oy + ev.clientY - viewerDrag.y,
+  }
+}
+
+function viewerPanEnd() {
+  viewerDrag = null
+}
+
+function viewerKey(ev: KeyboardEvent) {
+  if (ev.key === 'Escape') viewerIdx.value = -1
+  else if (ev.key === 'ArrowLeft') viewerMove(-1)
+  else if (ev.key === 'ArrowRight') viewerMove(1)
+}
+
 async function downloadImage(m: VideoMedia) {
   if (imgBusy.value) return
   imgBusy.value = m.url
@@ -284,7 +347,8 @@ onMounted(() => {
       <!-- 图片媒体：缩略图网格（防盗链），单张下载 -->
       <div v-if="imageMedias.length" class="imggrid">
         <div v-for="(m, i) in imageMedias" :key="'i' + i" class="imgcell">
-          <img :src="m.url" referrerpolicy="no-referrer" loading="lazy" alt="" />
+          <img :src="m.url" referrerpolicy="no-referrer" loading="lazy" alt=""
+               title="点击查看大图" style="cursor: zoom-in" @click="openViewer(i)" />
           <button class="imgdl" :disabled="imgBusy === m.url"
                   :title="`下载第 ${i + 1} 张`" @click="downloadImage(m)">
             {{ imgBusy === m.url ? '…' : '⬇' }}
@@ -326,6 +390,23 @@ onMounted(() => {
         </div>
         <video :key="previewMedia.url" :src="previewMedia.url" controls autoplay
                style="width: 100%; height: calc(100% - 44px); background: #000" />
+      </div>
+    </div>
+
+    <!-- 图集查看器（对齐原版 ImageViewerOverlay：滚轮锚点缩放/拖拽平移/双击复位/左右切换/Esc 关闭） -->
+    <div v-if="viewerIdx >= 0 && imageMedias[viewerIdx]" class="viewer-mask"
+         tabindex="0" @keydown="viewerKey" @wheel="viewerZoom"
+         @pointerdown="viewerPanStart" @pointermove="viewerPanMove"
+         @pointerup="viewerPanEnd" @pointercancel="viewerPanEnd"
+         @dblclick="viewerReset" @click.self="viewerIdx = -1">
+      <img class="viewer-img" :src="imageMedias[viewerIdx].url" referrerpolicy="no-referrer" alt=""
+           draggable="false"
+           :style="{ transform: `translate(-50%, -50%) translate(${viewerOffset.x}px, ${viewerOffset.y}px) scale(${viewerScale})` }" />
+      <div class="viewer-bar">
+        <button class="btn text small" @click.stop="viewerMove(-1)">‹ 上一张</button>
+        <span class="dim">{{ viewerIdx + 1 }} / {{ imageMedias.length }} · {{ Math.round(viewerScale * 100) }}%</span>
+        <button class="btn text small" @click.stop="viewerMove(1)">下一张 ›</button>
+        <button class="btn text small" style="margin-left: auto" @click.stop="viewerIdx = -1">关闭 (Esc)</button>
       </div>
     </div>
   </div>
@@ -382,4 +463,13 @@ onMounted(() => {
 .preview-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; height: 44px;
   box-sizing: border-box; }
 .preview-bar b { flex: 1; font-size: 14px; }
+/* 图集查看器（对齐原版 ImageViewerOverlay） */
+.viewer-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.82); z-index: 70;
+  outline: none; cursor: grab; }
+.viewer-mask:active { cursor: grabbing; }
+.viewer-img { position: absolute; left: 50%; top: 50%; max-width: 92vw; max-height: 86vh;
+  transform-origin: center center; user-select: none; pointer-events: none; }
+.viewer-bar { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 10px;
+  align-items: center; padding: 10px 16px; background: rgba(0, 0, 0, 0.55); color: #eee; }
+.viewer-bar .dim { font-size: 13px; }
 </style>
