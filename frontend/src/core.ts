@@ -102,6 +102,64 @@ export async function downloadGetLink(taskId: number):
   return call('download_get_link', { taskId })
 }
 
+// ---- 下载调试（对齐原版 DownloadDebugScreen；设置开 downloadDebug 后行菜单出现入口）----
+
+/** 单个在飞分片（= 一个 worker 此刻在干什么），字段与 core ChunkDebug 一一对应 */
+export interface DebugChunk {
+  key: string
+  start: number
+  size: number
+  worker: number
+  received: number
+  bps: number
+  elapsedMs: number
+  idleMs: number
+  preemptCount: number
+  preempting: boolean
+}
+
+/** 全局资源快照（在飞配额 / 活跃任务 / 线程池 / 堆内存） */
+export interface DebugResources {
+  inflightCap: number
+  inflightUsed: number
+  activeTasks: number
+  heapUsed: number
+  heapMax: number
+  poolSize: number
+  poolActive: number
+  poolQueue: number
+}
+
+export interface DebugInfo {
+  ok: boolean
+  error?: string
+  task: {
+    id: number; fileName: string; status: number; statusText: string
+    total: number; downloaded: number; platform: string; engine: string
+    chunkCount: number; avgSpeed: number; error: string; sourceCount: number
+  }
+  stats: { speed: number; remainMillis: number; chunkCount: number; mergePercent: number } | null
+  chunks: DebugChunk[]
+  resources: DebugResources
+  sourceCount: number
+  logs: string[]
+  logTotal: number
+  enabled: boolean
+  env: string
+  snapshot: string
+}
+
+/** 一次性调试快照（前端 5 秒轮询；任务不存在返回 ok:false） */
+export function downloadDebugInfo(taskId: number, limit = 200) {
+  return call<DebugInfo>('download_debug_info', { taskId, limit })
+}
+
+/** 导出完整日志到 <缓存目录>/logs，返回文件路径 */
+export function downloadDebugExport(taskId: number) {
+  return call<{ ok: boolean; path?: string; fileName?: string; error?: string }>(
+    'download_debug_export', { taskId })
+}
+
 // download_list 全量返回：tasks 之外带 stats（mergePercent>0 表示有任务处于 ffmpeg 合轨阶段）
 export interface DownloadStats {
   mergePercent: number

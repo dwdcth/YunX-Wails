@@ -560,6 +560,15 @@ onMounted(load)
         <i class="switch" :class="{ on: s.fullFileSha256 }"
            @click="s.fullFileSha256 = !s.fullFileSha256; save('fullFileSha256', s.fullFileSha256)" />
       </div>
+      <div class="row" style="margin-top: 10px">
+        <span style="flex: 1">下载调试
+          <span class="dim" style="display: block; font-size: 12px; margin-top: 2px">
+            开启后新任务记录调试日志；关闭会清空日志（开启时下载页任务菜单出现「调试信息」入口）
+          </span>
+        </span>
+        <i class="switch" :class="{ on: s.downloadDebug }"
+           @click="s.downloadDebug = !s.downloadDebug; save('downloadDebug', s.downloadDebug)" />
+      </div>
       <p class="hint" style="margin: 10px 0 0">
         多账号下载与单文件多源分片开启前有二次风险确认；默认值：HTTP/2 关、读缓冲 64 KB、慢连接抢占开（12 KB/s · 15 秒）
       </p>

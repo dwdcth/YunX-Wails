@@ -6,8 +6,12 @@ import com.yunx.app.AppContext
 import com.yunx.app.data.backup.AuthBackupManager
 import com.yunx.app.data.db.AppDatabase
 import com.yunx.app.data.db.DownloadTaskEntity
+import com.yunx.app.data.download.ChunkDebug
 import com.yunx.app.data.download.ChunkDownloader
+import com.yunx.app.data.download.DownloadDebugLog
 import com.yunx.app.data.download.DownloadManager
+import com.yunx.app.data.download.DownloadResourceDebug
+import com.yunx.app.data.download.DownloadStats
 import com.yunx.app.data.download.DownloadTuning
 import com.yunx.app.data.host.HostServices
 import com.yunx.app.data.host.HostStores
@@ -113,6 +117,11 @@ import java.util.prefs.Preferences
  * - download_pause_all → {paused}；download_resume_all → {resumed}
  * - download_remove_all {deleteLocal?} → {removed}
  *
+ * 下载调试（对齐原版 DownloadDebugScreen；先在设置开 downloadDebug，行菜单才出现入口）：
+ * - download_debug_info {taskId, limit?} → {task, stats, chunks[], resources, sourceCount,
+ *   logs[](最近 N 条), logTotal, enabled, env, snapshot}（拉取式只读快照，前端 5 秒轮询）
+ * - download_debug_export {taskId} → {path, fileName}（完整日志写 <缓存目录>/logs，core 同源导出 API）
+ *
  * 公告与更新（网络命令）：
  * - announcements_list {page?} → 列表（含已读标记）；announcement_detail {id}；announcement_mark_read {id}
  * - update_check → 最新 Release 与当前版本比较；github_mirror_refresh → 镜像测速
@@ -134,12 +143,14 @@ object DllFacade {
     private fun downloadManager(): DownloadManager = manager ?: synchronized(this) {
         manager ?: run {
             AppContext.init()
-            // 与桌面 Main.kt 启动装配对齐（HTTP2 + 下载调优），DLL 内引擎读同一份设置
+            // 与桌面 Main.kt 启动装配对齐（HTTP2 + 下载调优 + 下载调试日志按持久化开关装上），DLL 内引擎读同一份设置
             runCatching {
                 val settings = SettingsRepository()
                 HttpClients.setHttp2Enabled(settings.http2Enabled)
                 DownloadTuning.applyFrom(settings)
             }
+            // 必须在任何下载开始前调用：按持久化开关决定是否记录调试日志（对齐桌面 Main.kt）
+            runCatching { DownloadDebugLog.install() }
             DownloadManager(
                 dao = AppDatabase.get().downloadTaskDao(),
                 downloader = ChunkDownloader(clientProvider = { HttpClients.downloadClient() }),
@@ -416,6 +427,8 @@ object DllFacade {
                     }
                     // 运行时联动：调优类设置即时生效（代理的应用由 Go 宿主负责注入）
                     if (key == "http2Enabled") HttpClients.setHttp2Enabled(s.http2Enabled)
+                    // 下载调试：开启即时开始记录；关闭即清空全部日志（对齐原版 ThemeController.setEnabled 联动）
+                    if (key == "downloadDebug") runCatching { DownloadDebugLog.setEnabled(s.downloadDebug) }
                     runCatching { DownloadTuning.applyFrom(s) }
                     resp.put("stored", key)
                 }
@@ -1113,6 +1126,91 @@ object DllFacade {
                         .put("headers", headers)
                 }
 
+                "download_debug_info" -> {
+                    // 下载调试一次性快照（对齐原版 DownloadDebugScreen 每秒拉取的数据面；
+                    // 前端 5 秒轮询，不开调试页时零额外开销——core 侧全是拉取式只读快照）
+                    val id = req.getLong("taskId")
+                    val task = runBlocking { AppDatabase.get().downloadTaskDao().get(id) }
+                        ?: return error("任务不存在：$id").toString()
+                    val mgr = downloadManager()
+                    val stats = mgr.stats.value[id]
+                    val chunks = mgr.chunkDebugSnapshot(id)
+                    val resources = mgr.resourceDebugSnapshot()
+                    val allLogs = DownloadDebugLog.entries(id)
+                    val limit = req.optInt("limit", 200).coerceIn(1, 2000)
+                    val logs = if (allLogs.size > limit) allLogs.takeLast(limit) else allLogs
+                    // 多源（实验性 C2）只报源数：解密 altSources 计数，绝不透出直链/Cookie
+                    val altCount = countAltSources(task.altSourcesJson)
+                    val taskJson = JSONObject()
+                        .put("id", task.id)
+                        .put("fileName", task.fileName)
+                        .put("status", task.status)
+                        .put("statusText", DownloadTaskEntity.statusText(task.status))
+                        .put("total", task.totalSize)
+                        .put("downloaded", task.downloadedSize)
+                        .put("platform", task.platform.ifBlank { "" })
+                        .put("engine", task.engineTaskId)
+                        .put("chunkCount", task.chunkCount)
+                        .put("avgSpeed", task.avgSpeed)
+                        .put("error", task.errorMsg)
+                        .put("sourceCount", 1 + altCount)
+                    val statsJson = stats?.let {
+                        JSONObject()
+                            .put("speed", it.speed)
+                            .put("remainMillis", it.remainMillis)
+                            .put("chunkCount", it.chunkCount)
+                            .put("mergePercent", it.mergePercent)
+                    } ?: JSONObject.NULL
+                    val chunksArr = JSONArray()
+                    for (c in chunks) {
+                        chunksArr.put(
+                            JSONObject()
+                                .put("key", c.key)
+                                .put("start", c.start)
+                                .put("size", c.size)
+                                .put("worker", c.worker)
+                                .put("received", c.received)
+                                .put("bps", c.bps)
+                                .put("elapsedMs", c.elapsedMs)
+                                .put("idleMs", c.idleMs)
+                                .put("preemptCount", c.preemptCount)
+                                .put("preempting", c.preempting)
+                        )
+                    }
+                    val logsArr = JSONArray()
+                    logs.forEach { logsArr.put(it) }
+                    val env = runCatching { DownloadDebugLog.environmentSnapshot() }.getOrDefault("未知")
+                    resp.put("task", taskJson)
+                        .put("stats", statsJson)
+                        .put("chunks", chunksArr)
+                        .put("resources", JSONObject()
+                            .put("inflightCap", resources.inflightCap)
+                            .put("inflightUsed", resources.inflightUsed)
+                            .put("activeTasks", resources.activeTasks)
+                            .put("heapUsed", resources.heapUsed)
+                            .put("heapMax", resources.heapMax)
+                            .put("poolSize", resources.poolSize)
+                            .put("poolActive", resources.poolActive)
+                            .put("poolQueue", resources.poolQueue))
+                        .put("sourceCount", 1 + altCount)
+                        .put("logs", logsArr)
+                        .put("logTotal", allLogs.size)
+                        .put("enabled", DownloadDebugLog.isEnabled())
+                        .put("env", env)
+                        // 调试快照文本（与原版 buildSnapshotText 同一口径；直链不出现 ⇒ 无需脱敏）
+                        .put("snapshot", buildDebugSnapshotText(task, stats, chunks, resources, env))
+                }
+
+                "download_debug_export" -> {
+                    // 导出完整日志：core 现成 API（与原版同一处：写 <缓存目录>/logs 后返回文件）
+                    val id = req.getLong("taskId")
+                    val task = runBlocking { AppDatabase.get().downloadTaskDao().get(id) }
+                        ?: return error("任务不存在：$id").toString()
+                    val file = DownloadDebugLog.exportToFile(task)
+                        ?: return error("导出日志失败（目录不可写？稍后重试）").toString()
+                    resp.put("path", file.absolutePath).put("fileName", file.name)
+                }
+
                 "announcements_list" -> {
                     val page = req.optInt("page", 1)
                     val readIds = announcementReadStore.readIds.value
@@ -1234,6 +1332,97 @@ object DllFacade {
                 .put("modifyTime", f.modifyTime))
         }
         return arr
+    }
+
+    /**
+     * 多源备选源计数（download_debug_info 的 sourceCount）：解密 `download.altSources`
+     * 只数条数，绝不透出直链/Cookie。密文损坏/解不开按 0（单源）处理——与 core
+     * loadPersistedAltSources 的容错口径一致：多源只是提速手段，不影响任务本身。
+     */
+    private fun countAltSources(stored: String): Int {
+        if (stored.isBlank()) return 0
+        return runCatching {
+            val text = com.yunx.app.data.security.CredentialDecoder
+                .tryDecrypt(stored, "download.altSources") ?: return 0
+            JSONArray(text).length()
+        }.getOrDefault(0)
+    }
+
+    /**
+     * 调试快照文本（原版 DownloadDebugScreen.buildSnapshotText 的 DLL 同款）：
+     * 任务字段 + 实时统计 + 在飞分片表 + 全局资源 + 环境快照。复制到剪贴板用；
+     * 不含直链/Cookie ⇒ 无脱敏问题。
+     */
+    private fun buildDebugSnapshotText(
+        task: DownloadTaskEntity,
+        stats: DownloadStats?,
+        chunks: List<ChunkDebug>,
+        resources: DownloadResourceDebug?,
+        env: String,
+    ): String = buildString {
+        appendLine("云析 YunX-Desktop 下载调试快照")
+        appendLine("任务 id：${task.id}　文件名：${task.fileName}")
+        appendLine("状态：${DownloadTaskEntity.statusText(task.status)}　平台：${task.platform.ifBlank { "-" }}")
+        appendLine("执行器：${task.engineTaskId.ifBlank { "内置分片下载器" }}")
+        appendLine("大小：${task.downloadedSize} / ${task.totalSize} 字节")
+        appendLine("环境：$env")
+        if (stats != null) {
+            appendLine("实时：${dbgSpeed(stats.speed)}　剩余 ${dbgRemain(stats.remainMillis)}　${stats.chunkCount} 线程")
+        }
+        if (task.errorMsg.isNotBlank()) appendLine("失败原因：${task.errorMsg}")
+        appendLine()
+        appendLine("---------- 在飞分片（${chunks.size}）----------")
+        if (chunks.isEmpty()) {
+            appendLine("（无）")
+        } else {
+            chunks.forEach {
+                appendLine(
+                    "${it.key} | worker#${it.worker} | 区间 ${it.start}-${it.start + it.size - 1} | " +
+                        "已收 ${it.received}/${it.size} | 瞬时 ${it.bps}B/s | 已跑 ${it.elapsedMs}ms | " +
+                        "抢占 ${it.preemptCount} 次${if (it.preempting) "（待换连接）" else ""}"
+                )
+            }
+        }
+        appendLine()
+        appendLine("---------- 全局资源 ----------")
+        if (resources == null) {
+            appendLine("（读取中）")
+        } else {
+            appendLine("在飞分片：${resources.inflightUsed}/${resources.inflightCap}")
+            appendLine("活跃任务：${resources.activeTasks}")
+            appendLine("分片 IO 线程池：线程 ${resources.poolSize} · 忙 ${resources.poolActive} · 队列 ${resources.poolQueue}")
+            appendLine("堆内存：${resources.heapUsed / 1024 / 1024}MB / ${resources.heapMax / 1024 / 1024}MB")
+        }
+    }
+
+    private fun dbgSize(bytes: Long): String {
+        if (bytes <= 0) return "0 B"
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var i = 0
+        while (value >= 1024 && i < units.size - 1) {
+            value /= 1024
+            i++
+        }
+        return String.format("%.1f %s", value, units[i])
+    }
+
+    private fun dbgSpeed(bytesPerSec: Long): String = if (bytesPerSec > 0) {
+        "${dbgSize(bytesPerSec)}/s"
+    } else {
+        "0 B/s"
+    }
+
+    private fun dbgRemain(millis: Long): String = when {
+        millis < 0 -> "计算中"
+        else -> {
+            val sec = millis / 1000
+            when {
+                sec < 60 -> "${sec}秒"
+                sec < 3600 -> "${sec / 60}分${sec % 60}秒"
+                else -> "${sec / 3600}时${(sec % 3600) / 60}分"
+            }
+        }
     }
 
     /** 与桌面 prefsStoreFactory 完全同源的节点映射（desktop/.../host/PrefsKeyValueStore.kt）。 */
