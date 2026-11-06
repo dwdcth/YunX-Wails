@@ -36,6 +36,10 @@ onMounted(async () => {
       <a href="https://github.com/tidain/YunX-Desktop" target="_blank" style="color: var(--primary); font-size: 14px">
         github.com/tidain/YunX-Desktop
       </a>
+      <p class="hint" style="margin-top: 8px">
+        本项目基于 GNU AGPL-3.0 协议开源（原版衍生，版权归上游作者所有）；
+        下载内容版权归原作者所有，请于下载后 24 小时内删除。
+      </p>
     </div>
 
     <div class="card">
