@@ -65,11 +65,13 @@ func main() {
 	})
 	wailsApp = app
 
-	// 宿主能力（Linux）：下载期防睡眠 + 剪贴板分享链接检测（对齐原版 KeepAwake/ClipboardLinkPopup）
+	// 宿主能力（Linux）：下载期防睡眠 + 剪贴板分享链接检测（对齐原版 KeepAwake/ClipboardLinkPopup）。
+	// 两者都经核心命令通道读设置开关（keepAwakeWhileDownloading / notificationShowSpeed /
+	// clipboardLinkDetection）；核心惰性初始化，首次调用才加载（与 KeepAwake 看门狗同一通道）。
 	hostenv.StartKeepAwakeWatcher(func(req string) (string, error) { return coreService.Call(req) })
 	hostenv.StartClipboardWatcher(func(link string) {
 		wailsApp.Event.Emit("clipboard:link", link)
-	})
+	}, func(req string) (string, error) { return coreService.Call(req) })
 	// 浏览器插件桥（对齐原版 BrowserBridgeServer 协议，37021-37030 端口扫描）
 	coreService.bridge = StartBrowserBridge(app, coreService)
 

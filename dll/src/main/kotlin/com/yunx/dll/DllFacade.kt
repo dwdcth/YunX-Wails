@@ -703,11 +703,13 @@ object DllFacade {
                         pdirFid = "",
                         fidToken = req.optString("fidToken"),
                     )
+                    // 夸克/UC 共用 __puus：取链前确保新鲜（直链签名绑定取链时刻的 Cookie）；
+                    // fresh 提到外层供多源备选源构造复用（备选池的过滤基准就是这份主源凭证）
+                    val fresh = if (guest) "" else runBlocking { ResolveGateway.freshCredential(plat, cred) }
                     val link = runBlocking {
                         if (guest) {
                             repo.getGuestShareDownloadLink(session, file)
                         } else {
-                            val fresh = ResolveGateway.freshCredential(plat, cred)
                             repo.getShareDownloadLinkWithoutSave(session, file, fresh)
                                 .recoverCatching {
                                     if (plat == com.yunx.app.data.network.SharePlatform.QUARK) {
@@ -737,8 +739,10 @@ object DllFacade {
                                 headers = headers,
                                 size = link.size,
                                 platform = plat.name.lowercase(),
-                                // C1/C2 多源：多账号下载开启且平台支持时，附带其他账号凭证的备选源
-                                altSources = ExtraGateway.buildAltSources(plat, finalUrl, headers, effectiveCred),
+                                // C1/C2 多源：两个开关同时开且平台受支持时，其他账号各自重新取
+                                // 一条直链作为备选源（夸克直链绑定账号，同 URL 换 Cookie 不可靠）；
+                                // 游客链路 fresh 为空串，buildAltSources 直接不建
+                                altSources = ExtraGateway.buildAltSources(plat, repo, session, file, fresh),
                                 saveDir = req.optString("saveDir"),
                             ) {
                                 // 下载完成（或失败落定）后清理转存临时目录（对齐桌面 onComplete）

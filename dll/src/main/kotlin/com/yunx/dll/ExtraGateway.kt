@@ -33,7 +33,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * - 批量下载执行器（share_folder_download / batch_list）：后台协程递归展开分享目录并逐文件
  *   入队下载，批次状态存内存（ConcurrentHashMap + AtomicInteger），进程重启即丢（与 DLL 定位一致）；
- * - C1/C2 多源（share_download 的 altSources）：多账号下载开启时把其他账号凭证构造成备选下载源；
+ * - C1/C2 多源（share_download 的 altSources）与凭证轮换（share_folder_download）：
+ *   多账号下载（C1）开启时批量下载逐文件轮换账号凭证；再叠开多源分片（C2）时，
+ *   单文件下载由其他账号各自重新取一条直链构造备选源（夸克直链绑定账号，同 URL 换 Cookie 不可靠）；
  * - 视频账号 DAO 直访（video_accounts_list / video_login_cookie）：core 的 VideoAccountRepository
  *   是 internal，DLL 不能引用，只能走公开的 AppDatabase.videoAccountDao()（内部已做列级加解密）；
  * - 视频解析（video_parse / video_parse_quality）：VideoLinkParser 识别 → 短链展开 → 纯 HTTP 解析器，
@@ -125,7 +127,9 @@ object ExtraGateway {
 
     /**
      * 批量执行体：递归展开目录 → 逐文件取直链并入队。
-     * 单文件失败只计入 failed/lastError，不中断整批（对齐桌面批量下载的逐项 runCatching）。
+     * 多账号下载（C1）开启时按文件序号轮换凭证池里的账号取链（对齐桌面批量下载的
+     * credentialRotation，每个文件仍只用一个账号）；单文件失败只计入 failed/lastError，
+     * 不中断整批（对齐桌面批量下载的逐项 runCatching）。
      */
     private suspend fun runFolderBatch(
         state: BatchState,
@@ -141,6 +145,10 @@ object ExtraGateway {
         try {
             // 夸克/UC 共用 __puus：整批的取链与下载必须用同一份已刷新 Cookie（对齐桌面批量入口）
             val fresh = if (cred.isBlank()) "" else ResolveGateway.freshCredential(plat, cred)
+            // 多账号下载（C1）：开启时构造凭证池（主账号在前），批内逐文件轮换取链；
+            // 开关关 / 游客（cred 空）时池退化为一条 fresh，行为与未开启完全一致
+            //（对齐桌面 ResolveViewModel:590 的 credentialRotation 轮换语义）
+            val credentialPool = if (cred.isBlank()) emptyList() else credentialRotation(plat, fresh)
             val tasks = mutableListOf<Pair<ShareFile, String>>()
             // fid 是文件时列目录必然失败：回退按单文件下载（对齐桌面 downloadSelected 的文件直入语义）
             val listed = runCatching { repo.listFiles(session, fid, fresh).getOrNull() }.getOrNull()
@@ -155,20 +163,24 @@ object ExtraGateway {
                 state.lastError = "所选文件夹为空"
                 return
             }
-            for ((file, relPath) in tasks) {
+            for ((index, task) in tasks.withIndex()) {
+                val (file, relPath) = task
+                // 本次文件用哪个账号：按文件序号轮换（取链与下载始终用同一份凭证，
+                // 池只剩主账号一条时自然退回单账号——对齐桌面批量下载 :633 的取法）
+                val fileCred = if (credentialPool.isEmpty()) fresh else credentialPool[index % credentialPool.size]
                 try {
                     // 游客态走游客取链；登录态优先免转存，夸克失败时回退转存取链（与 share_download 同款）
                     val link = (if (cred.isBlank()) {
                         repo.getGuestShareDownloadLink(session, file)
                     } else {
-                        repo.getShareDownloadLinkWithoutSave(session, file, fresh)
+                        repo.getShareDownloadLinkWithoutSave(session, file, fileCred)
                             .recoverCatching {
                                 if (plat == SharePlatform.QUARK) {
-                                    repo.getShareDownloadLink(session, file, fresh).getOrThrow()
+                                    repo.getShareDownloadLink(session, file, fileCred).getOrThrow()
                                 } else throw it
                             }
                     }).getOrElse { throw IllegalStateException(it.message ?: "取直链失败") }
-                    val effectiveCred = if (cred.isBlank()) link.guestCookie else fresh
+                    val effectiveCred = if (cred.isBlank()) link.guestCookie else fileCred
                     val finalUrl = ResolveGateway.fastestUrl(plat, link.downloadUrl, effectiveCred)
                     val headers = ResolveGateway.downloadHeaders(plat, effectiveCred, link)
                     manager.enqueue(
@@ -227,37 +239,83 @@ object ExtraGateway {
 
     // ---- C1/C2 多源（share_download 的 altSources）----
 
+    /** 单文件多源分片（实验性 C2）支持的平台（对齐桌面 ResolveViewModel.multiSourcePlatforms）：其余平台即使开着也退回单源。 */
+    private val multiSourcePlatforms = setOf(
+        SharePlatform.QUARK,
+        SharePlatform.UC,
+        SharePlatform.XUNLEI,
+        SharePlatform.BAIDU,
+    )
+
     /**
-     * 单文件多源分片（实验性 C2）的备选源构造：多账号下载（C1）开启且平台支持时，
-     * 用同一平台**除当前凭证外**的其它账号凭证各造一条 DownloadSource（同一 URL、Cookie 换成备选凭证）。
-     *
-     * ★ 平台只接夸克/UC：两家的下载请求头差异只有 Cookie 一项，沿用主源头换 Cookie 即可
-     *   （对齐桌面 ResolveViewModel 的注释约定；115 双 Cookie 之类平台接入时必须重新评估）。
-     *
-     * @param url 主源直链（备选源与主源同 URL，只换身份）
-     * @param headers 主源下载请求头
-     * @param currentCred 主源所用凭证（游客直链为空串 —— 游客 URL 配登录 Cookie 会被 CDN 拒，不做多源）
+     * 多账号下载（实验性 C1）的凭证池（对齐桌面 ResolveViewModel.credentialRotation）：
+     * 当前平台全部账号的凭证，主账号在前；开关关闭 / 没有账号时回退 [fallback] 一条
+     * （调用方传主源凭证，行为与未开启时完全一致）。
      */
-    fun buildAltSources(
+    private suspend fun credentialRotation(platform: SharePlatform, fallback: String): List<String> {
+        if (!SettingsRepository().multiAccountDownload) return listOf(fallback)
+        val credentials = when (platform) {
+            SharePlatform.QUARK -> ResolveGateway.quarkAccount.allCredentials()
+            SharePlatform.UC -> ResolveGateway.ucAccount.allCredentials()
+            SharePlatform.XUNLEI -> ResolveGateway.xunleiAccount.allCredentials()
+            SharePlatform.BAIDU -> ResolveGateway.baiduAccount.allCredentials()
+            SharePlatform.C139 -> ResolveGateway.c139Account.allCredentials()
+            SharePlatform.PAN123 -> ResolveGateway.pan123Account.allCredentials()
+            SharePlatform.PAN115 -> ResolveGateway.pan115Account.allCredentials()
+            SharePlatform.GUANGYA -> ResolveGateway.guangyaAccount.allCredentials()
+            SharePlatform.ILANZOU -> ResolveGateway.ilanzouAccount.allCredentials()
+            SharePlatform.LANZOU -> ResolveGateway.lanzouAccount.allCredentials()
+            SharePlatform.GITHUB -> emptyList()
+        }.filter { it.isNotBlank() }
+        return credentials.ifEmpty { listOf(fallback) }
+    }
+
+    /**
+     * 单文件多源分片（实验性 C2）的备选源构造（对齐桌面 ResolveViewModel.fetchAltLinks）：
+     * C1（multiAccountDownload）与 C2（multiSourceDownload）**同时开启**且平台受支持时，
+     * 用同一平台除当前凭证外的其它账号凭证**各自重新取一条直链**，组成各自的 DownloadSource。
+     *
+     * ★ 夸克/UC 直链与取链账号绑定：同一 URL 换个账号 Cookie 会被 CDN 拒（412/403），
+     *   备选源必须重新取链，不能复用主源 URL。任一账号取链失败就跳过它
+     *   （多源只是提速手段，少一条照样能把文件下完）。
+     *
+     * @param repo 平台取链仓库（与主源同源，来自 ResolveGateway.repoFor）
+     * @param session 当前分享会话
+     * @param file 目标文件
+     * @param currentCred 主源所用凭证（游客链路为空串 —— 游客 URL 配账号 Cookie 会被 CDN 拒，不做多源）
+     */
+    suspend fun buildAltSources(
         platform: SharePlatform,
-        url: String,
-        headers: Map<String, String>,
+        repo: ShareResolveRepository,
+        session: ShareSession,
+        file: ShareFile,
         currentCred: String
     ): List<DownloadSource> {
-        // C2 依赖 C1：主开关没开就保持单源，行为与未接入前完全一致
-        if (!SettingsRepository().multiAccountDownload) return emptyList()
-        if (platform != SharePlatform.QUARK && platform != SharePlatform.UC) return emptyList()
+        // C2 依赖 C1：multiSourceActive = 两个开关同时开（C1 开 C2 关不建，对齐桌面口径）
+        if (!SettingsRepository().multiSourceActive()) return emptyList()
+        if (platform !in multiSourcePlatforms) return emptyList()
         if (currentCred.isBlank()) return emptyList()
-        val creds = runBlocking {
-            when (platform) {
-                SharePlatform.QUARK -> ResolveGateway.quarkAccount.allCredentials()
-                else -> ResolveGateway.ucAccount.allCredentials()
+        return credentialRotation(platform, currentCred)
+            .filter { it != currentCred }
+            .mapNotNull { cred ->
+                // 每个备选账号各自重新取一条直链（与主链路同款：免转存优先，夸克失败回退转存）
+                runCatching {
+                    repo.getShareDownloadLinkWithoutSave(session, file, cred)
+                        .recoverCatching {
+                            if (platform == SharePlatform.QUARK) {
+                                repo.getShareDownloadLink(session, file, cred).getOrThrow()
+                            } else throw it
+                        }
+                        .getOrThrow()
+                }.getOrNull()?.let { link ->
+                    // 该源自己的 url + headers：夸克直链做 CDN 节点优选，请求头按备选凭证配
+                    //（四平台下载头差异只有 Cookie 一项，downloadHeaders(备选凭证) 等价于主源头换 Cookie）
+                    DownloadSource(
+                        url = ResolveGateway.fastestUrl(platform, link.downloadUrl, cred),
+                        headers = ResolveGateway.downloadHeaders(platform, cred, link),
+                    )
+                }
             }
-        }
-        return creds.filter { it != currentCred }.map { cred ->
-            val altHeaders = if (headers.containsKey("Cookie")) headers + ("Cookie" to cred) else headers
-            DownloadSource(url = url, headers = altHeaders)
-        }
     }
 
     // ---- 云盘分享凭证帮手（cloud_share；与 CloudGateway.require* 同源）----
