@@ -13,13 +13,20 @@
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "/wails/runtime.js";
 
 /**
- * ApplyHostDefaults 启动装配：机器标识（显式配置 > 系统真值）、代理（正式设置的 proxyMode，默认 direct）、
- * ffmpeg（显式配置路径）。失败的项记日志不阻断启动。
- * 在 ensureCore 里核心加载成功后被自动调用；也可在外部显式调用（幂等，重复注入无害）。
+ * ApplyHostDefaults 启动装配（公开入口：先确保核心就绪；幂等，重复注入无害）。
  * @returns {$CancellablePromise<void>}
  */
 export function ApplyHostDefaults() {
     return $Call.ByID(1198797690);
+}
+
+/**
+ * Aria2Status aria2 引擎状态：{running, version, port, binPath, found}。
+ * found=false 表示本机找不到 aria2-next 二进制，UI 引导用户去设置 aria2Path。
+ * @returns {$CancellablePromise<string>}
+ */
+export function Aria2Status() {
+    return $Call.ByID(2092401897);
 }
 
 /**
@@ -94,6 +101,86 @@ export function LegacyImportStatus() {
 }
 
 /**
+ * NormalDownloadList 全量任务列表（含 ftp 无 gid 任务），created_at 倒序。
+ * 返回 {ok, tasks:[{id,engine,gid,url,name,saveDir,savePath,size,downloaded,progress,speed,status,err,createdAt,updatedAt}]}。
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadList() {
+    return $Call.ByID(2891555661);
+}
+
+/**
+ * NormalDownloadPause 暂停任务。返回 {ok, error?}。
+ * @param {number} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadPause(id) {
+    return $Call.ByID(3354510449, id);
+}
+
+/**
+ * NormalDownloadPauseAll 全部暂停。
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadPauseAll() {
+    return $Call.ByID(2955798280);
+}
+
+/**
+ * NormalDownloadRemove 移除任务（不删已下载文件——对齐云盘 remove 语义，删文件走前端单独入口）。
+ * @param {number} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadRemove(id) {
+    return $Call.ByID(1029384305, id);
+}
+
+/**
+ * NormalDownloadRemoveAll 全部移除（不删已下载文件）。
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadRemoveAll() {
+    return $Call.ByID(2667197192);
+}
+
+/**
+ * NormalDownloadResume 恢复任务（FTP 从断点续传）。
+ * @param {number} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadResume(id) {
+    return $Call.ByID(2246594998, id);
+}
+
+/**
+ * NormalDownloadResumeAll 全部恢复。
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadResumeAll() {
+    return $Call.ByID(369393909);
+}
+
+/**
+ * NormalDownloadShutdown 手动停引擎（应用退出钩子也会调；幂等）。优雅 kill aria2 子进程。
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadShutdown() {
+    return $Call.ByID(629624391);
+}
+
+/**
+ * NormalDownloadSubmit 提交普通下载（source：http/https/ftp/ftps/magnet/ed2k 链接，
+ * 本地或 URL 的 .torrent/.metalink 文件路径）。saveDir 空时用默认下载目录（核心 downloadDirUri）。
+ * 返回 {ok, taskId, taskIds, engine, name, error?}；metalink 多文件时 taskIds 有多条。
+ * @param {string} source
+ * @param {string} saveDir
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadSubmit(source, saveDir) {
+    return $Call.ByID(3853427577, source, saveDir);
+}
+
+/**
  * OpenDirectory 打开文件所在目录（xdg-open / Windows explorer）。
  * @param {string} path
  * @returns {$CancellablePromise<string>}
@@ -129,7 +216,8 @@ export function Ping() {
 }
 
 /**
- * SetFfmpeg 注入外部 ffmpeg 路径。path 为空 = 自动探测系统 PATH；探测不到则清除注入（核心回退内置探测）。
+ * SetFfmpeg 注入外部 ffmpeg 路径（公开入口：先确保核心就绪）。
+ * path 为空 = 自动探测系统 PATH；探测不到则清除注入（核心回退内置探测）。
  * @param {string} path
  * @returns {$CancellablePromise<string>}
  */
@@ -138,8 +226,8 @@ export function SetFfmpeg(path) {
 }
 
 /**
- * SetProxy 配置代理并注入核心。mode：direct / system（Go 探测）/ manual。
- * 选择持久化到正式设置（yunx/settings，与原版互通），启动时由 ApplyHostDefaults 重新生效。
+ * SetProxy 配置代理并注入核心（公开入口：先确保核心就绪）。mode：direct / system（Go 探测）/ manual。
+ * 选择持久化到正式设置（yunx/settings，与原版互通），启动时由 applyHostDefaults 重新生效。
  * @param {string} mode
  * @param {string} host
  * @param {number} port

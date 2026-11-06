@@ -48,6 +48,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("core init: %v", err)
 	}
+	// 普通下载引擎（aria2-next + 内置 FTP + 独立任务库）：注入核心回调（KV/设置读取），
+	// 失败不阻断启动（首个下载调用时把错误报给前端）。
+	normalDownloadInit(coreService)
 	// 宿主装配（机器标识/代理/ffmpeg）已并入 ensureCore：首个核心调用时自动执行，
 	// 不在启动时显式调用（保持惰性初始化，配合首启导入原版数据的门控）。
 
@@ -62,6 +65,8 @@ func main() {
 			// （bindings 用 -b 内置 runtime 时必需，AssetFileServerFS 不带会 404）
 			Handler: application.BundledAssetFileServer(assets),
 		},
+		// 应用退出钩子：优雅停 aria2-next 子进程与 FTP worker（幂等，run 结束路径双保险）
+		OnShutdown: normalDownloadShutdown,
 	})
 	wailsApp = app
 
