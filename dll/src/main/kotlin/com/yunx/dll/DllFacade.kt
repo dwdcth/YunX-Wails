@@ -32,7 +32,9 @@ import com.yunx.app.data.prefs.SettingsRepository
 import com.yunx.app.data.preview.FfmpegLocator
 import com.yunx.app.data.repository.AccountDirectory
 import com.yunx.app.data.security.DbEncryptionLevel
+import com.yunx.app.data.security.DbEncryptionManager
 import com.yunx.app.data.security.DbKeyStore
+import com.yunx.app.data.storage.StorageMigrator
 import com.yunx.app.data.update.UpdateChecker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,8 +70,16 @@ import java.util.prefs.Preferences
  * - download_submit / download_list / download_pause / download_resume / download_remove
  *
  * 设置（正式 SettingsRepository，与 Compose 原版/Linux 移植版同一份 yunx/settings）：
- * - settings_list       → 全量快照（含 misc 的 onboarding_shown）
+ * - settings_list       → 全量快照（含 misc 的 onboarding_shown；另附储存目录「当前生效」实际路径
+ *                          与数据库加密**实际**档位，供 UI 区分「重启前/重启后生效」）
  * - settings_set        → {key, value}（typed，见 [SettingsKeys]；含运行时联动）
+ *
+ * 储存目录（对齐原版 StorageDirectoryScreen；目录改动一律**重启应用生效**——AppContext 启动时只解析一次）：
+ * - settings_set storageCacheDir / storageDbDir / dbEncryptionLevel（空串 = 恢复默认/清 null）
+ * - storage_migrate_db {targetDir} → 搬迁数据库（yunx.db/-wal/-shm + credential.key 拷贝到新目录、
+ *   记「旧位置待清理」、写 storageDbDir；失败一律不写配置），源 = 当前 AppContext 实际目录
+ * - storage_apply_encryption {level} → 切换数据库加密等级（解包主密钥 → 按新档重新包裹 → 原子替换，
+ *   立即生效无需重启；与原版 DbEncryptionManager.switchTo 同一动作）
  *
  * 账号（AccountDirectory，SQLite 明文列，不暴露凭证）：
  * - accounts_list / account_set_primary / account_set_remark / account_remove
@@ -134,6 +144,10 @@ object DllFacade {
         // 必须在任何 AppContext/HostStores.named 触碰前生效（named 结果会被缓存）。
         // native 环境若不可用则退回默认 FileKeyValueStore（仅损失与原版互通）。
         runCatching { HostStores.factory = ::prefsStoreFactory }
+        // 启动装配（对齐桌面 Main.kt 的 AppContext.init()）：建目录 + 旧数据目录迁移 +
+        // 「储存目录」搬迁后旧位置残留清理（storage_migrate_db 记下的待清理标记在这里消费）。
+        // 失败不阻断（目录不可写等场景核心仍能响应纯设置命令）。
+        runCatching { AppContext.init() }
     }
 
     /** 下载引擎单例：首次使用时惰性构建（AppDatabase 单例 + 内置 ChunkDownloader，无外部引擎）。 */
@@ -376,6 +390,13 @@ object DllFacade {
                             .put("dbEncryptionLevel", s.dbEncryptionLevel)
                             .put("storageDbDir", s.storageDbDir ?: JSONObject.NULL)
                             .put("storageCacheDir", s.storageCacheDir ?: JSONObject.NULL)
+                            // ---- 储存目录只读快照（对齐原版 StorageSettingsPanel 的「当前生效」展示）----
+                            // 实际生效目录：AppContext 启动时解析一次，改动重启后才变（配置值≠生效值 = 待重启）
+                            .put("storageDataDir", AppContext.dataDir.absolutePath)
+                            .put("storageDbDirEffective", AppContext.dbDir.absolutePath)
+                            .put("storageCacheDirEffective", AppContext.cacheDir.absolutePath)
+                            // 加密**实际**档位：以 credential.key 里实际的封装格式为准（偏好可能是手动改过的）
+                            .put("dbEncryptionEffectiveLevel", DbEncryptionManager.effectiveLevel().id)
                             .put("onboardingShown", AppContext.miscPrefs.getBoolean("onboarding_shown", false))
                     )
                 }
@@ -421,6 +442,14 @@ object DllFacade {
                         "downloadDebug" -> s.downloadDebug = value.toBoolean()
                         "fullFileSha256" -> s.fullFileSha256 = value.toBoolean()
                         "ignoreSslCert" -> s.ignoreSslCert = value.toBoolean()
+                        // ---- 储存目录三项（改动需重启应用生效：AppContext 启动时只读一次）----
+                        // 空串 = 清 null（恢复默认位置：缓存 <数据目录>/cache、数据库 <数据目录>）
+                        "storageCacheDir" ->
+                            if (value.isBlank()) s.storageCacheDir = null else s.storageCacheDir = value
+                        "storageDbDir" ->
+                            if (value.isBlank()) s.storageDbDir = null else s.storageDbDir = value
+                        // 只写偏好档位（不重包裹密钥）；真正的切档动作走 storage_apply_encryption（同原版 DbEncryptionManager.switchTo）
+                        "dbEncryptionLevel" -> s.dbEncryptionLevel = value
                         "onboardingShown" ->
                             AppContext.miscPrefs.putBoolean("onboarding_shown", value.toBoolean())
                         else -> return error("unknown settings key: $key").toString()
@@ -431,6 +460,84 @@ object DllFacade {
                     if (key == "downloadDebug") runCatching { DownloadDebugLog.setEnabled(s.downloadDebug) }
                     runCatching { DownloadTuning.applyFrom(s) }
                     resp.put("stored", key)
+                }
+
+                // ---- 储存目录（对齐原版 StorageDirectoryScreen；确认弹窗在 UI 侧，这里只做校验+执行）----
+
+                "storage_migrate_db" -> {
+                    // 原版 StorageSettingsPanel.choose()+migrate() 的 DLL 版：
+                    // 校验目标 → 拷贝数据文件 → 记「旧位置待清理」→ 写 storageDbDir。
+                    // 四条准则与原版 StorageMigrator 一致：只拷贝不删除 / 目标必须干净 /
+                    // 失败不切配置 / 搬移源 = 当前 AppContext 实际目录（dbDir，重启后才变）。
+                    val raw = req.getString("targetDir")
+                    if (raw.isBlank()) return error("targetDir must not be blank").toString()
+                    val target = File(raw)
+                    val source = AppContext.dbDir
+                    val settings = SettingsRepository()
+                    val configured = settings.storageDbDir?.let { File(it) } ?: AppContext.dataDir
+                    when {
+                        // 目标 = 已配置目录：无事可做（原版「已经是该设置」）
+                        samePath(target, configured) -> resp
+                            .put("migrated", false)
+                            .put("reason", "already-configured")
+                            .put("target", target.absolutePath)
+                        // 目标 = 当前正在用的目录：不搬数据，只把配置写回去（原版「已切回当前生效目录」）
+                        samePath(target, source) -> {
+                            settings.storageDbDir =
+                                if (samePath(target, AppContext.dataDir)) null else target.absolutePath
+                            resp.put("migrated", false)
+                                .put("reason", "target-is-effective")
+                                .put("target", target.absolutePath)
+                        }
+                        else -> {
+                            // 目标已存在 yunx.db 一律拒绝（防止两套数据混在一起）+ 探针文件验可写
+                            StorageMigrator.checkDatabaseTarget(target)?.let {
+                                return error(it).toString()
+                            }
+                            val report = try {
+                                StorageMigrator.migrateDatabase(source, target)
+                            } catch (e: Throwable) {
+                                // 拷贝失败：原样保留旧配置，宁可「没搬成」也不「搬一半就切过去」
+                                return error("搬迁失败，目录设置未改动：${e.message ?: e.javaClass.simpleName}").toString()
+                            }
+                            // 迁移成功才记待清理 + 写配置（默认位置存 null，跟随数据根目录）
+                            StorageMigrator.rememberCleanupForDatabase(source)
+                            settings.storageDbDir =
+                                if (samePath(target, AppContext.dataDir)) null else target.absolutePath
+                            val skipped = JSONArray()
+                            report.skipped.forEach { skipped.put(it) }
+                            resp.put("migrated", true)
+                                .put("copiedFiles", report.copiedFiles)
+                                .put("copiedBytes", report.copiedBytes)
+                                .put("skipped", skipped)
+                                .put("skippedCount", report.skippedCount)
+                                .put("source", source.absolutePath)
+                                .put("target", target.absolutePath)
+                                .put("restartRequired", true)
+                        }
+                    }
+                }
+
+                "storage_apply_encryption" -> {
+                    // 原版 DbEncryptionManager.switchTo 的 DLL 版：解包主密钥 → 按新档重新包裹 → 原子替换，
+                    // 不碰库里任何数据，秒级完成、立即生效（无需重启）。失败保持原档位与原密钥文件不变。
+                    val target = DbEncryptionLevel.entries.firstOrNull { it.id == req.getString("level") }
+                        ?: return error(
+                            "未知加密等级：${req.optString("level")}（可用：${DbEncryptionLevel.entries.joinToString("/") { it.id }}）"
+                        ).toString()
+                    DbEncryptionManager.switchTo(target).fold(
+                        onSuccess = { previous ->
+                            resp.put("applied", target.id)
+                                .put("label", target.label)
+                                .put("effectiveLevel", DbEncryptionManager.effectiveLevel().id)
+                                .put("previousEffective", previous?.id ?: JSONObject.NULL)
+                        },
+                        onFailure = { e ->
+                            return error(
+                                "切换加密等级失败，仍保持原档位：${e.message ?: e.javaClass.simpleName}"
+                            ).toString()
+                        },
+                    )
                 }
 
                 "accounts_list" -> {
@@ -1303,6 +1410,10 @@ object DllFacade {
 
     private fun platformOf(name: String): SharePlatform? =
         runCatching { SharePlatform.valueOf(name.trim().uppercase()) }.getOrNull()
+
+    /** 两个路径是否指向同一位置（原版 StorageDirectoryScreen.samePath 同款；取不到 canonical 时退回绝对路径比较） */
+    private fun samePath(a: File, b: File): Boolean =
+        runCatching { a.canonicalPath == b.canonicalPath }.getOrDefault(a.absolutePath == b.absolutePath)
 
     /** cloud_move/cloud_delete 的 files:[{fid,fname?,fsize?,isdir?,fidToken?}] 解析。 */
     private fun filesFromReq(req: JSONObject): List<ShareFile> {

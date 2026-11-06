@@ -207,6 +207,11 @@ export interface AppSettings {
   dbEncryptionLevel: string
   storageDbDir?: string | null
   storageCacheDir?: string | null
+  // 只读快照（DLL settings_list 附带）：实际生效目录与加密**实际**档位（见下方储存目录封装）
+  storageDataDir?: string
+  storageDbDirEffective?: string
+  storageCacheDirEffective?: string
+  dbEncryptionEffectiveLevel?: string
   onboardingShown: boolean
 }
 
@@ -222,6 +227,39 @@ export async function settingsSet(key: string, value: string | number | boolean)
 /** 带平台维度的设置写入（如按平台线程数：key 固定 downloadThreadsFor，platform 字段区分平台） */
 export function settingsSetPlatform(key: string, platform: string, value: string | number | boolean) {
   return call<{ ok: boolean; error?: string }>('settings_set', { key, platform, value: String(value) })
+}
+
+// ---- 储存目录（对齐原版 StorageDirectoryScreen；目录改动重启应用后生效）----
+
+/** 数据库搬迁结果：migrated=false 时 reason = already-configured（已是该设置）/ target-is-effective（切回当前生效目录） */
+export interface StorageMigrateResult {
+  ok: boolean
+  error?: string
+  migrated?: boolean
+  reason?: string
+  copiedFiles?: number
+  copiedBytes?: number
+  skipped?: string[]
+  skippedCount?: number
+  source?: string
+  target?: string
+  restartRequired?: boolean
+}
+
+/**
+ * 搬迁数据库（yunx.db/-wal/-shm + credential.key）到新目录：拷贝 + 记旧位置待清理 + 写 storageDbDir。
+ * 失败（目标已存在库文件 / 不可写 / 拷贝失败）一律不改配置；成功后需重启应用生效。
+ */
+export function storageMigrateDb(targetDir: string) {
+  return call<StorageMigrateResult>('storage_migrate_db', { targetDir })
+}
+
+/** 切换数据库加密等级（解包主密钥 → 按新档重新包裹 → 原子替换；立即生效，无需重启） */
+export function storageApplyEncryption(level: string) {
+  return call<{
+    ok: boolean; error?: string
+    applied?: string; label?: string; effectiveLevel?: string; previousEffective?: string | null
+  }>('storage_apply_encryption', { level })
 }
 
 // ---- 账号（AccountDirectory，明文列，不含凭证）----

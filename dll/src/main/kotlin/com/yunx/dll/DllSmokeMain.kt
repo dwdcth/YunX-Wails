@@ -89,6 +89,45 @@ fun main() {
         // 强制 flush：让 native-image-agent 采到 java.util.prefs 的 XML 写出链路元数据
         runCatching { java.util.prefs.Preferences.userRoot().flush() }
     }
+
+    // 储存目录冒烟（prefs 根 + 数据目录均隔离时才跑；上面已注入 host_set_machine_id）：
+    // ① 三键 settings_set 往返；② 加密档位 loose↔normal 重包裹后 key_roundtrip 仍一致；
+    // ③ storage_migrate_db 拷贝 yunx.db/credential.key 到新目录 + 配置回读（重启语义由 native 两阶段冒烟验证）。
+    if (System.getProperty("java.util.prefs.userRoot")?.isNotBlank() == true &&
+        !System.getenv("YUNX_DESKTOP_DATA_DIR").isNullOrBlank()
+    ) {
+        val dataDir = File(System.getenv("YUNX_DESKTOP_DATA_DIR"))
+        val target = File(System.getProperty("java.io.tmpdir"), "yunx-dll-smoke-db-migrate")
+        target.deleteRecursively()
+        for (c in listOf(
+            // ① 缓存/数据库目录配置往返（空串 = 清 null 恢复默认）
+            """{"cmd":"settings_set","key":"storageCacheDir","value":"/tmp/yunx-smoke-cache"}""",
+            """{"cmd":"settings_set","key":"storageCacheDir","value":""}""",
+            // ② 建钥（宽松档）→ 切普通档（重包裹）→ 回读仍一致 → 切回宽松
+            """{"cmd":"key_roundtrip","dir":"${dataDir.absolutePath}"}""",
+            """{"cmd":"storage_apply_encryption","level":"normal"}""",
+            """{"cmd":"key_roundtrip","dir":"${dataDir.absolutePath}"}""",
+            """{"cmd":"storage_apply_encryption","level":"loose"}""",
+            """{"cmd":"key_roundtrip","dir":"${dataDir.absolutePath}"}""",
+            // ③ 数据库搬迁（占位库文件即可；checkpoint 失败会被 StorageMigrator 内部吞掉并连同 -wal 拷贝兜底）
+            """{"cmd":"storage_migrate_db","targetDir":"${target.absolutePath}"}""",
+            """{"cmd":"storage_migrate_db","targetDir":"${target.absolutePath}"}""",
+            """{"cmd":"settings_list"}""",
+        )) {
+            // ③ 前先放占位库文件（真实 yunx.db 未建时兜底；建了则保留真实文件）
+            if (c.contains("storage_migrate_db") && !File(dataDir, "yunx.db").isFile) {
+                File(dataDir, "yunx.db").writeText("placeholder")
+            }
+            println("REQ $c")
+            println("RESP " + DllFacade.handle(c))
+        }
+        println(
+            "DB_MIGRATE_FILES target=" +
+                listOf("yunx.db", "credential.key").all { File(target, it).isFile } +
+                " oldKept=" + File(dataDir, "yunx.db").isFile
+        )
+        runCatching { java.util.prefs.Preferences.userRoot().flush() }
+    }
     println("SMOKE_DONE")
 }
 

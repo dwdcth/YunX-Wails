@@ -4,8 +4,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
-import { githubMirrorRefresh, kvPut, settingsList, settingsSet, settingsSetPlatform, updateCheck,
-         type AppSettings } from '../core'
+import { fmtBytes, githubMirrorRefresh, kvPut, settingsList, settingsSet, settingsSetPlatform,
+         storageApplyEncryption, storageMigrateDb, updateCheck, type AppSettings } from '../core'
 import { applySeedColor, cachedSeedColor, seedNumToHex, setThemeMode, theme } from '../theme'
 
 const router = useRouter()
@@ -260,6 +260,114 @@ async function unignoreVersion() {
   done(r ? '已取消忽略 ✓' : '写入失败')
 }
 
+// ---- 储存目录（对齐原版 StorageDirectoryScreen 四项；目录改动重启应用后生效）----
+// 说明：目录「配置值」与「当前生效值」可能不同（改完还没重启）——分别展示，不合并成一句。
+
+const cacheDirInput = ref('')
+const dbTargetDir = ref('')
+
+// 数据库目录：配置值（空 = 默认数据根目录）与生效值（AppContext 启动时解析一次）
+const dbConfigured = computed(() => s.value?.storageDbDir || s.value?.storageDataDir || '')
+const dbEffective = computed(() => s.value?.storageDbDirEffective || dbConfigured.value)
+const dbPendingRestart = computed(() =>
+  !!s.value?.storageDataDir && dbConfigured.value !== dbEffective.value)
+// 缓存目录同理（默认 = <数据目录>/cache）
+const cacheDefault = computed(() =>
+  s.value?.storageDataDir ? `${s.value.storageDataDir}/cache` : '')
+const cacheConfigured = computed(() => s.value?.storageCacheDir || cacheDefault.value)
+const cacheEffective = computed(() => s.value?.storageCacheDirEffective || cacheConfigured.value)
+const cachePendingRestart = computed(() =>
+  !!s.value?.storageDataDir && cacheConfigured.value !== cacheEffective.value)
+
+async function saveCacheDir() {
+  await save('storageCacheDir', cacheDirInput.value.trim())
+}
+
+/** 数据库搬迁（拷贝 yunx.db/-wal/-shm + credential.key → 记待清理 → 写配置；失败不切配置） */
+const migrateConfirm = ref<{ source: string; target: string } | null>(null)
+const migrateBusy = ref(false)
+const migrateResult = ref('')
+
+function askMigrate() {
+  const target = dbTargetDir.value.trim()
+  if (!target) { done('请先填写新目录'); return }
+  migrateConfirm.value = { source: dbEffective.value, target }
+}
+
+/** 绑定本机的加密档（换机器后凭证解不开；原版在「数据库不在用户目录」时提示便携版风险） */
+const encMachineBound = computed(() =>
+  ['normal', 'strict'].includes(s.value?.dbEncryptionEffectiveLevel ?? 'normal'))
+const dbPortableWarn = computed(() =>
+  encMachineBound.value && !!s.value?.storageDataDir && dbConfigured.value !== s.value.storageDataDir)
+
+async function confirmMigrate() {
+  const req = migrateConfirm.value
+  migrateConfirm.value = null
+  if (!req) return
+  migrateBusy.value = true
+  try {
+    const r = await storageMigrateDb(req.target)
+    if (!r.ok) {
+      done(`搬迁失败：${r.error}`)
+    } else if (r.migrated) {
+      migrateResult.value =
+        `已搬迁 ${r.copiedFiles} 个文件（${fmtBytes(r.copiedBytes ?? 0)}）` +
+        (r.skippedCount ? `，${r.skippedCount} 个文件被占用已跳过` : '') +
+        ` → ${r.target}\n重启应用后生效；旧位置的数据库文件会在下次启动时删除。`
+    } else if (r.reason === 'target-is-effective') {
+      done('已切回当前生效目录（无需搬迁）')
+    } else {
+      done('已经是该设置')
+    }
+    await load()
+  } catch (e) {
+    done(`搬迁失败：${e}`)
+  } finally {
+    migrateBusy.value = false
+  }
+}
+
+// ---- 数据库加密等级（切档 = 重新包裹 credential.key，不碰库内数据、立即生效无需重启）----
+// 档位名/说明/后果提示照抄原版 DbEncryptionLevel 与 StorageDirectoryScreen 文案；
+// UI 展示**实际**档位（密钥文件里的封装格式），非偏好值。
+// 「较为严格」需 Windows DPAPI（当前宿主未提供）、「严格」需 SQLCipher（原版亦未支持）——如实标注并禁用。
+
+const ENC_LEVELS = [
+  { id: 'loose', label: '宽松', disabled: false, disabledNote: '',
+    desc: '库明文 · 凭证列加密 · 密钥明文存放。换机器 / 便携版必须用这档',
+    warning: '密钥将以明文存放在 credential.key 中：任何能读到该文件的人都能解开网盘凭证。只在需要用便携版 / 换机器时选择。' },
+  { id: 'normal', label: '普通（默认）', disabled: false, disabledNote: '',
+    desc: '库明文 · 凭证列加密 · 密钥用本机派生密钥包裹（绑定本机，换机器解不开）',
+    warning: '密钥将用本机派生密钥包裹：绑定当前这台机器。\n之后把数据库/密钥拷到别的电脑、或重装系统，凭证将无法解密（表现为网盘账号全部未登录，需重新登录）。\n如果需要便携使用，请保持「宽松」。' },
+  { id: 'strict', label: '较为严格', disabled: true, disabledNote: '需 Windows DPAPI，当前宿主暂未提供',
+    desc: '库明文 · 凭证列加密 · 密钥用 Windows DPAPI 保护（绑定当前 Windows 用户）',
+    warning: '' },
+  { id: 'strictest', label: '严格', disabled: true, disabledNote: 'SQLCipher 暂未支持（原版同）',
+    desc: '库整体加密（SQLCipher）—— 暂未支持',
+    warning: '' },
+]
+const effectiveLevel = computed(() =>
+  s.value?.dbEncryptionEffectiveLevel ?? s.value?.dbEncryptionLevel ?? 'normal')
+const pendingLevel = ref<typeof ENC_LEVELS[number] | null>(null)
+
+function onPickLevel(lv: typeof ENC_LEVELS[number]) {
+  if (lv.disabled) { done(`「${lv.label}」${lv.disabledNote}`); return }
+  if (lv.id !== effectiveLevel.value) pendingLevel.value = lv
+}
+
+async function confirmLevel() {
+  const lv = pendingLevel.value
+  pendingLevel.value = null
+  if (!lv) return
+  const r = await storageApplyEncryption(lv.id)
+  if (r.ok) {
+    done(`加密等级已切换为「${lv.label}」（立即生效）`)
+    await load()
+  } else {
+    done(`切换失败，仍保持原档位：${r.error}`)
+  }
+}
+
 async function load() {
   try {
     s.value = await settingsList()
@@ -277,6 +385,7 @@ async function load() {
     expTuning.value.preemptSec = clampInt(Math.round(Number(ex.slowPreemptMinAgeMs ?? 15000) / 1000),
       PREEMPT_SEC.min, PREEMPT_SEC.max, PREEMPT_SEC.def)
     mirrorPrefix.value = s.value?.githubMirrorPrefix ?? ''
+    cacheDirInput.value = s.value?.storageCacheDir ?? ''
   } catch (e) {
     loadError.value = String(e)
   }
@@ -361,13 +470,6 @@ onMounted(load)
         </div>
       </div>
       <div class="row" style="margin-bottom: 12px">
-        <div class="field" style="flex: 1">
-          <label>默认下载目录（空 = 系统下载目录）</label>
-          <input class="input" v-model="s.downloadDirUri" placeholder="/home/xxx/Downloads"
-                 @change="save('downloadDirUri', s.downloadDirUri ?? '')" />
-        </div>
-      </div>
-      <div class="row" style="margin-bottom: 12px">
         <div class="field" style="flex: 1; min-width: 150px">
           <label>全局限速（字节/秒，0 = 不限）</label>
           <input class="input" type="number" min="0" v-model.number="s.downloadSpeedLimit"
@@ -408,6 +510,85 @@ onMounted(load)
                  placeholder="0 = 跟随全局" @change="savePlatformThreads(p.key)" />
         </div>
       </div>
+    </div>
+
+    <div v-if="s" class="card">
+      <h3>储存目录（与原版互通）</h3>
+      <p class="hint">目录改动需重启应用生效（核心启动时只解析一次）；切换数据库位置时会把旧位置的数据自动搬到新位置（旧文件留到下次启动再清理）</p>
+
+      <!-- ① 下载保存目录 -->
+      <div class="field" style="margin-bottom: 12px">
+        <label>下载保存目录（下载完成后文件的落盘位置，空 = 系统「下载」文件夹）</label>
+        <input class="input" v-model="s.downloadDirUri" placeholder="/home/xxx/Downloads"
+               @change="save('downloadDirUri', s.downloadDirUri ?? '')" />
+      </div>
+
+      <!-- ② 下载缓存目录 -->
+      <div class="field" style="margin-bottom: 6px">
+        <label>下载缓存目录（下载分片、合并临时文件；空 = 默认 {{ cacheDefault || '…' }}）</label>
+        <input class="input" v-model="cacheDirInput" :placeholder="cacheDefault"
+               @change="saveCacheDir" />
+      </div>
+      <div class="pathrow">
+        <template v-if="cachePendingRestart">
+          <span class="pathlabel">重启后生效</span>
+          <code class="codepath">{{ cacheConfigured }}</code>
+          <span class="pathlabel" style="margin-top: 4px">当前生效（重启前）</span>
+          <code class="codepath">{{ cacheEffective }}</code>
+        </template>
+        <template v-else>
+          <span class="pathlabel">当前生效</span>
+          <code class="codepath">{{ cacheConfigured }}</code>
+        </template>
+      </div>
+      <p class="hint" style="margin: 6px 0 0">
+        仅写入配置、不自动搬移旧缓存：已下载的分片留在原目录，未完成任务下次开始时从头下载
+      </p>
+
+      <!-- ③ 数据库位置 -->
+      <div class="field" style="margin: 14px 0 6px">
+        <label>数据库位置（任务、收藏、历史与网盘账号凭证：yunx.db + credential.key，两者必须同处一地）</label>
+        <div class="row" style="flex-wrap: nowrap">
+          <input class="input" style="flex: 1" v-model="dbTargetDir"
+                 :placeholder="dbConfigured" @keydown.enter="askMigrate" />
+          <button class="btn tonal small" :disabled="migrateBusy" @click="askMigrate">
+            {{ migrateBusy ? '搬迁中…' : '搬迁…' }}
+          </button>
+        </div>
+      </div>
+      <div class="pathrow">
+        <template v-if="dbPendingRestart">
+          <span class="pathlabel">重启后生效</span>
+          <code class="codepath">{{ dbConfigured }}</code>
+          <span class="pathlabel" style="margin-top: 4px">当前生效（重启前）</span>
+          <code class="codepath">{{ dbEffective }}</code>
+        </template>
+        <template v-else>
+          <span class="pathlabel">当前生效</span>
+          <code class="codepath">{{ dbConfigured }}</code>
+        </template>
+      </div>
+      <p class="hint" style="margin: 6px 0 0">
+        搬迁时连同 credential.key 一起搬走 —— 库里的凭证是用它加密的，分开会全部解不开；要搬回默认目录就填 {{ s.storageDataDir }}
+      </p>
+      <p class="hint" v-if="dbPortableWarn" style="margin: 6px 0 0">
+        ⚠ 数据库已不在用户目录，而当前加密等级绑定本机：若要把数据当作便携版带到别的电脑使用，请把加密等级切回「宽松」
+      </p>
+
+      <!-- ④ 数据库加密等级 -->
+      <div class="row" style="margin: 14px 0 8px; font-weight: 600">数据库加密等级</div>
+      <div v-for="lv in ENC_LEVELS" :key="lv.id" class="optrow"
+           :class="{ picked: effectiveLevel === lv.id, disabled: lv.disabled }"
+           @click="onPickLevel(lv)">
+        <i class="radio" :class="{ on: effectiveLevel === lv.id }" />
+        <div style="flex: 1; min-width: 0">
+          <div>{{ lv.label }}<span v-if="lv.disabled" class="dim">（{{ lv.disabledNote }}）</span></div>
+          <div class="dim">{{ lv.desc }}</div>
+        </div>
+      </div>
+      <p class="hint" style="margin: 10px 0 0">
+        三档都只保护密钥：库内账号凭证始终是 AES-256-GCM 密文，但任务文件名 / URL / 保存路径等元数据在三档下都是明文（整库加密需要 SQLCipher，暂未支持）。切档只重新包裹密钥，立即生效、无需重启
+      </p>
     </div>
 
     <div v-if="s" class="card">
@@ -592,7 +773,7 @@ onMounted(load)
 
     <div class="card">
       <h3>更多分组<span class="tag-m6">后续批次</span></h3>
-      <p class="hint">储存目录迁移 / 数据库加密档位 / Gopeed 引擎管理 —— 待后续批次接入</p>
+      <p class="hint">Gopeed 引擎管理 —— 待后续批次接入</p>
     </div>
 
     <!-- 多账号下载 / 单文件多源分片：开启前二次风险确认（.mask/.dlg 对齐 DownloadView 弹窗，文案照原版 MultiAccountRisk 原文） -->
@@ -603,6 +784,44 @@ onMounted(load)
         <div class="row end">
           <button class="btn text small" @click="pendingRisk = null">取消</button>
           <button class="btn small" @click="confirmRisk">确认开启</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 数据库搬迁确认（文案对齐原版 StorageDirectoryScreen 搬迁弹窗） -->
+    <div v-if="migrateConfirm" class="mask" @click.self="migrateConfirm = null">
+      <div class="dlg">
+        <h3>搬迁数据库？</h3>
+        <p class="hint">
+          数据库（含凭证密钥）将从<br><code class="codepath">{{ migrateConfirm.source }}</code><br>搬迁到<br><code class="codepath">{{ migrateConfirm.target }}</code><br><br>
+          搬迁完成后需要重启应用才会生效。旧位置的数据库文件会在下次启动时删除。<template v-if="encMachineBound"><br><br>⚠ 当前加密等级绑定本机：若要把数据当作便携版带到别的电脑使用，请先把加密等级切回「宽松」。</template>
+        </p>
+        <div class="row end">
+          <button class="btn text small" @click="migrateConfirm = null">取消</button>
+          <button class="btn small" @click="confirmMigrate">开始搬迁</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 搬迁完成：提示重启（Wails 壳无法自行重启核心 isolate，手动重启即可） -->
+    <div v-if="migrateResult" class="mask" @click.self="migrateResult = ''">
+      <div class="dlg">
+        <h3>搬迁完成，需重启生效</h3>
+        <p class="hint" style="white-space: pre-line">{{ migrateResult }}</p>
+        <div class="row end">
+          <button class="btn small" @click="migrateResult = ''">稍后手动重启</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 加密等级切换确认（后果提示照原版 levelWarning 原文；普通档绑定本机必须让用户明确知道） -->
+    <div v-if="pendingLevel" class="mask" @click.self="pendingLevel = null">
+      <div class="dlg">
+        <h3>切换为「{{ pendingLevel.label }}」？</h3>
+        <p class="hint" style="white-space: pre-line">{{ pendingLevel.warning }}</p>
+        <div class="row end">
+          <button class="btn text small" @click="pendingLevel = null">取消</button>
+          <button class="btn small" @click="confirmLevel">切换</button>
         </div>
       </div>
     </div>
@@ -631,4 +850,20 @@ onMounted(load)
   gap: 10px; margin-top: 10px; padding-top: 12px; border-top: 1px dashed var(--outline-variant); }
 .trackers { font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace; font-size: 12.5px;
   resize: vertical; line-height: 1.6; }
+/* 储存目录：路径展示条（等宽、区分「当前生效 / 重启后生效」）与加密档位单选行 */
+.pathrow { display: flex; flex-direction: column; gap: 2px; background: var(--surface-container);
+  border-radius: 8px; padding: 8px 12px; }
+.pathlabel { font-size: 11.5px; color: var(--on-bg-variant); }
+.codepath { font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px; word-break: break-all; }
+.optrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px;
+  cursor: pointer; }
+.optrow:hover { background: var(--surface-container); }
+.optrow.picked { background: var(--surface-container-high); }
+.optrow.disabled { opacity: 0.5; cursor: not-allowed; }
+.radio { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--outline);
+  flex: none; position: relative; }
+.radio.on { border-color: var(--primary); }
+.radio.on::after { content: ''; position: absolute; inset: 3px; border-radius: 50%;
+  background: var(--primary); }
 </style>
