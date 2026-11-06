@@ -961,7 +961,11 @@ object DllFacade {
                         ?: return error("取直链失败（账号可能未登录或链接已过期）").toString()
                     val cred = runBlocking { ResolveGateway.credentialFor(plat) }
                     val finalUrl = ResolveGateway.fastestUrl(plat, link.downloadUrl, cred)
+                    val headers = ResolveGateway.downloadHeaders(plat, cred, link)
+                    val h = JSONObject()
+                    headers.forEach { (k, v) -> h.put(k, v) }
                     resp.put("url", finalUrl).put("filename", link.filename).put("size", link.size)
+                        .put("headers", h)
                 }
 
                 "share_transfer" -> {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 网盘页：账号卡片网格（配额）+ 点入平台后的云盘文件浏览器（列目录/建夹/重命名/移动/删除/下载/转存入口）。
 import { computed, onMounted, ref } from 'vue'
+import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
 import {
   accountRemove, accountSetPrimary, accountSetRemark, accountsList,
   cloudDelete, cloudDownload, cloudLink, cloudList, cloudMkdir, cloudMove, cloudQuota, cloudRename,
@@ -183,16 +184,24 @@ async function reloadCurrent() {
 const previewUrl = ref('')
 const previewName = ref('')
 const previewBusy = ref(false)
+const previewFail = ref('')
+
+function closePreview() {
+  previewUrl.value = ''
+  previewFail.value = ''
+}
 
 async function doPreview(f: ShareFile) {
   if (!browsing.value || previewBusy.value) return
   previewBusy.value = true
   error.value = ''
   try {
-    const r = await cloudLink(browsing.value, f)
+    const r = JSON.parse(await CoreService.CloudPreviewURL(
+      browsing.value, f.fid, f.fname, f.fsize ?? 0, f.fidToken ?? ''))
     if (r.ok && r.url) {
       previewUrl.value = r.url
-      previewName.value = r.filename || f.fname
+      previewName.value = f.fname
+      previewFail.value = ''
     } else {
       error.value = r.error ?? '取直链失败'
     }
@@ -362,18 +371,6 @@ onMounted(() => {
                       @confirm="doMove" @cancel="moving = null" />
     </template>
 
-    <!-- 云盘视频预览：CDN 直链 + 原生播放器（需鉴权头的平台可能播不了，尽力而为） -->
-    <div v-if="previewUrl" class="preview-mask" @click.self="previewUrl = ''">
-      <div class="preview-box">
-        <div class="preview-bar">
-          <b>{{ previewName }}</b>
-          <button class="btn text small" style="margin-left: auto" @click="previewUrl = ''">关闭</button>
-        </div>
-        <video :key="previewUrl" :src="previewUrl" controls autoplay
-               style="width: 100%; height: calc(100% - 44px); background: #000" />
-      </div>
-    </div>
-
     <!-- 卡片网格模式 -->
     <template v-else>
       <div class="banner">账号/设置/任务与原版同一数据库互通；登录入口（WebView2/粘贴 Cookie）待批次 D。</div>
@@ -439,7 +436,22 @@ onMounted(() => {
                   @done="(ok) => { loggingIn = null; if (ok) { refresh(); refreshQuota() } }"
                   @cancel="loggingIn = null" />
     </template>
-  </div>
+  
+    <!-- 云盘视频预览：Go 本地代理流（带核心请求头+Range），Esc/点背景/按钮可关 -->
+    <div v-if="previewUrl" class="preview-mask" tabindex="0"
+         @keydown.esc="previewUrl = ''" @click.self="closePreview">
+      <div class="preview-box">
+        <div class="preview-bar">
+          <b>{{ previewName }}</b>
+          <span v-if="previewFail" class="dim" style="font-size: 12px; color: var(--error)">{{ previewFail }}</span>
+          <button class="btn text small" style="margin-left: auto" @click="closePreview">关闭 (Esc)</button>
+        </div>
+        <video :key="previewUrl" :src="previewUrl" controls autoplay
+               style="width: 100%; height: calc(100% - 44px); background: #000"
+               @error="previewFail = '该源无法播放（格式不支持或源站拒绝），可下载后本地观看'" />
+      </div>
+    </div>
+</div>
 </template>
 
 <style scoped>

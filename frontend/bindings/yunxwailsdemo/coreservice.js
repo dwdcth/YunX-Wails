@@ -78,6 +78,19 @@ export function Call(requestJSON) {
 }
 
 /**
+ * CloudPreviewURL 云盘文件预览代理地址：cloud_link 取直链+请求头 → 登记到代理 → 返回可播 URL。
+ * @param {string} platform
+ * @param {string} fid
+ * @param {string} fname
+ * @param {number} fsize
+ * @param {string} fidToken
+ * @returns {$CancellablePromise<string>}
+ */
+export function CloudPreviewURL(platform, fid, fname, fsize, fidToken) {
+    return $Call.ByID(2038066982, platform, fid, fname, fsize, fidToken);
+}
+
+/**
  * HostStatus 宿主配置概览（设置页展示用）：代理（读正式设置）、ffmpeg 路径、机器标识可用性。
  * @returns {$CancellablePromise<string>}
  */
@@ -222,6 +235,16 @@ export function ParseShare(text) {
  */
 export function Ping() {
     return $Call.ByID(2464438806);
+}
+
+/**
+ * PreviewProxyURL 通用预览代理（视频解析 CDN 防盗链用）：带 Referer/UA 拉流。
+ * @param {string} url
+ * @param {string} referer
+ * @returns {$CancellablePromise<string>}
+ */
+export function PreviewProxyURL(url, referer) {
+    return $Call.ByID(3415163647, url, referer);
 }
 
 /**

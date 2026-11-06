@@ -4,6 +4,7 @@
 // B 站等多档位平台点清晰度 chip 走 video_parse_quality 切档；下载弹模式选择（合并/仅音频/仅视频）。
 // 解析页与剪贴板建议条会把视频链接分流到本页（localStorage yunx.pendingVideo 接力自动解析）。
 import { computed, onMounted, ref } from 'vue'
+import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
 import {
   accountRemove, fmtBytes, videoAccountsList, videoDownload, videoLoginCookie, videoParse,
   type VideoAccount, type VideoMedia, type VideoParseResult,
@@ -63,9 +64,16 @@ async function parse(text?: string, qualityId = '') {
 
 const previewMedia = ref<VideoMedia | null>(null)
 
-function openPreview(m: VideoMedia) {
+async function openPreview(m: VideoMedia) {
   if (!m.url) return
   previewMedia.value = m
+  // B 站等 CDN 有 Referer 防盗链，<video> 直连会黑屏：走 Go 本地代理（用视频页 origin 作 Referer）
+  try {
+    let referer = ''
+    try { referer = new URL(url.value).origin } catch { /* 无效页址则不带 */ }
+    const r = JSON.parse(await CoreService.PreviewProxyURL(m.url, referer))
+    if (r.ok && r.url) (m as { proxyUrl?: string }).proxyUrl = r.url
+  } catch { /* 代理不可用回退直连 */ }
 }
 
 // ---- 下载模式弹窗（.mask/.dlg 模式，对齐 DirPickerModal）----
@@ -388,7 +396,7 @@ onMounted(() => {
           </span>
           <button class="btn text small" @click="previewMedia = null">关闭</button>
         </div>
-        <video :key="previewMedia.url" :src="previewMedia.url" controls autoplay
+        <video :key="previewMedia.url" :src="(previewMedia as { proxyUrl?: string }).proxyUrl || previewMedia.url" controls autoplay
                style="width: 100%; height: calc(100% - 44px); background: #000" />
       </div>
     </div>
