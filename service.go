@@ -41,6 +41,7 @@ func NewCoreService() (*CoreService, error) {
 // ★ Once 体内只允许走「直连」路径（callLoaded / setProxyDirect 等）：若经 coreCall 或公开包装
 //   重入 ensureCore，sync.Once 不可重入会自锁（2026-11-06 启动无窗口事故的根因）。
 func (s *CoreService) ensureCore() error {
+	awaitImportGate() // 首启可导入时等用户做完导入决定（Go 侧自主调用者也走这里，见 legacyimport.go）
 	s.coreOnce.Do(func() {
 		core, err := yunxcore.Open()
 		if err != nil {

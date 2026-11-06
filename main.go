@@ -32,6 +32,10 @@ func main() {
 	// 单实例锁：双开会导致插件桥端口抢占与核心数据（KV/SQLite）并发写损坏
 	acquireInstanceLock()
 
+	// 首启导入闸门：当前「可导入原版数据」时布防——所有核心初始化（含看门狗等
+	// Go 侧自主调用者）等用户在首启弹窗做完决定再放行，保证导入的数据被直接吃到。
+	armImportGate()
+
 	// WebKitGTK DMABUF 渲染器规避（白屏问题，Arch/NVIDIA/特定 Mesa 常见；
 	// 必须在任何 WebKit 进程启动前设置，见 https://bugs.webkit.org/show_bug.cgi?id=259644）
 	// 用户已设置时不覆盖（支持 WEBKIT_FORCE_DMABUF=1 强制启用）

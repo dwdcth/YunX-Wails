@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,55 @@ const decisionMarker = ".import-decided"
 // core 的 filesDir 只放应用日志/崩溃转储（AppContext.filesDir 注释：杂项文件目录），正常
 // 都是文本小文件；上限纯防御（比如用户塞了巨大崩溃转储/别的大文件），避免导入卡半天。
 const filesDirCopyLimit = 64 << 20 // 64MB
+
+// ---- 首启导入决定闸门 ----
+// 「可导入」状态下布防：所有核心初始化（ensureCore）等用户做完导入决定再放行。
+// 防的是 Go 侧自主调用者——KeepAwake 看门狗每 5s 轮询 download_list、剪贴板监视等不经过
+// 前端首启弹窗门控，会在用户决定前抢先初始化核心、建出空 yunx.db，既毁掉「导入即生效」
+// （拷贝覆盖后旧句柄读旧库），又让 Decide 的 available 判定看到目标已有库而拒绝导入
+// （2026-11-06 实测事故：弹窗还开着，看门狗 12 秒后已把空库建好，导入被拒）。
+var (
+	importGateMu sync.RWMutex
+	importGateCh chan struct{}
+)
+
+// armImportGate main 启动时调用：仅当当前「可导入」时布防。
+func armImportGate() {
+	st := parseStatus((&CoreService{}).LegacyImportStatus())
+	if !st.Available {
+		return
+	}
+	importGateMu.Lock()
+	if importGateCh == nil {
+		importGateCh = make(chan struct{})
+	}
+	importGateMu.Unlock()
+}
+
+// releaseImportGate 决定完成后放行核心初始化（幂等，可安全多次调用）。
+func releaseImportGate() {
+	importGateMu.Lock()
+	if importGateCh != nil {
+		close(importGateCh)
+		importGateCh = nil
+	}
+	importGateMu.Unlock()
+}
+
+// awaitImportGate 核心初始化入口等待决定；10 分钟兜底超时防前端异常导致永久卡死。
+func awaitImportGate() {
+	importGateMu.RLock()
+	ch := importGateCh
+	importGateMu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Minute):
+		fmt.Println("导入闸门：等待导入决定超时（10 分钟），放行核心初始化")
+	}
+}
 
 // LegacyImportStatus 首启探测：原版数据可否导入、是否已询问过。
 // 返回 JSON：{available, asked, sourceDir, targetDir}。
@@ -37,6 +87,9 @@ func (s *CoreService) LegacyImportStatus() string {
 	available := !asked &&
 		fileExists(filepath.Join(sourceDir, "yunx.db")) &&
 		!fileExists(filepath.Join(targetDir, "yunx.db"))
+	if !available {
+		releaseImportGate() // 状态已不可导入（已决定/目标已有库）：撤防，别让核心干等
+	}
 	return marshalMust(map[string]any{
 		"available": available,
 		"asked":     asked,
@@ -55,18 +108,20 @@ func (s *CoreService) LegacyImportDecide(doImport bool) string {
 		return errorJSON(fmt.Sprintf("创建数据目录失败: %v", err))
 	}
 	if st := parseStatus(s.LegacyImportStatus()); !st.Available {
+		releaseImportGate() // 不可导入却还布防（状态已变）：撤防防卡死
 		return errorJSON("当前无可导入数据（原版数据不存在 / 已导入过 / 已决定跳过）")
 	}
 	if !doImport {
 		if err := writeDecision(targetDir, "skipped"); err != nil {
 			return errorJSON(fmt.Sprintf("写入决定标记失败: %v", err))
 		}
+		releaseImportGate()
 		return marshalMust(map[string]any{"ok": true, "imported": false})
 	}
 
 	res, err := runImport(legacySourceDir(), targetDir)
 	if err != nil {
-		// 失败不写标记：下次启动仍可重试（重试=覆盖同名文件继续拷）
+		// 失败不写标记：下次启动仍可重试（重试=覆盖同名文件继续拷）；闸门保持布防等重试
 		res.OK = false
 		res.Error = err.Error()
 		res.Partial = true
@@ -78,6 +133,7 @@ func (s *CoreService) LegacyImportDecide(doImport bool) string {
 			Copied: res.Copied, SkippedFiles: res.SkippedFiles, PrefsCopied: res.PrefsCopied,
 		})
 	}
+	releaseImportGate()
 	res.OK = true
 	res.Imported = true
 	return marshalMust(res)
