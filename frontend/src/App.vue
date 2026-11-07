@@ -57,9 +57,20 @@ onMounted(async () => {
   finishGate()
 })
 
+// WebKitGTK 首帧合成丢失缓解：双 rAF 后给根节点一个会触发重新合成的小变换再还原。
+// （与 Go 侧窗口 ±1px 抖动双保险；右键/inspector 能恢复就是这类问题的特征。）
+function paintKick() {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const el = document.documentElement
+    el.style.transform = 'translateZ(0)'
+    requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transform = '' }))
+  }))
+}
+
 /** 门控放行：挂载视图（触发核心惰性初始化）+ 原有的启动加载 */
 function finishGate() {
   legacy.value = null
+  paintKick()
   if (ready.value) return
   ready.value = true
   // 主题与原版互通：启动时读正式设置（yunx/settings 的 dark_mode），localStorage 只作秒开缓存

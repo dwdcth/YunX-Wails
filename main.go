@@ -102,12 +102,18 @@ func main() {
 		}()
 	}
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "YunX",
 		Width:  1200,
 		Height: 800,
 		URL:    "/",
 	})
+
+	// ★ WebKitGTK 初始绘制失败缓解：部分驱动下首帧合成丢失（内容已加载但画面空白，
+	// 右键/开 inspector 强制重绘才显示）。窗口 ±1px 抖两下强制 GTK/WebKit 重排重绘。
+	// 前端另有 transform 绘制踢（App.vue onMounted），双保险。
+	time.AfterFunc(400*time.Millisecond, func() { win.SetSize(1201, 800) })
+	time.AfterFunc(500*time.Millisecond, func() { win.SetSize(1200, 800) })
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
