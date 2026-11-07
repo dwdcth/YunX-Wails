@@ -425,7 +425,8 @@ func (a *Aria2) UnpauseAll() error {
 // ChangeGlobalOption 应用全局选项（bt-enable-dht / bt-tracker / max-concurrent-downloads /
 // max-overall-download-limit 等，aria2.changeGlobalOption）。需进程已在运行。
 func (a *Aria2) ChangeGlobalOption(opts map[string]string) error {
-	_, err := a.call("aria2.changeGlobalOption", opts)
+	res, err := a.call("aria2.changeGlobalOption", opts)
+	fmt.Printf("RPC changeGlobalOption: opts=%v res=%s err=%v\n", opts, string(res), err)
 	return err
 }
 
@@ -497,7 +498,7 @@ func (a *Aria2) pollTask(t *Task) {
 		// RPC 层故障（进程刚退/重启中）：整轮跳过，不清任务
 		if a.rpcAlive(url, secret) {
 			// RPC 活着但报错：GID 不存在等 → 任务在 aria2 侧已消失
-			_ = a.db.SetStatus(t.ID, StatusPaused, "aria2 会话已重置，点继续将重新提交")
+			_ = a.db.SetStatus(t.ID, StatusPaused, "")
 		}
 		return
 	}

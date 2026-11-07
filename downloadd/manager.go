@@ -197,6 +197,7 @@ func numberOf(v any) (int64, bool) {
 // 设置页保存相关键后调用 + aria2 启动后首次提交时自动应用（applyOptionsOnce）。
 func (m *Manager) ApplyGlobalOptions() error {
 	if m.hooks.Call == nil || !m.aria2.Running() {
+		fmt.Printf("APPLY-OPTIONS: skip (call=%v running=%v)\n", m.hooks.Call != nil, m.aria2.Running())
 		return nil
 	}
 	raw, err := m.hooks.Call(`{"cmd":"settings_list"}`)
@@ -214,9 +215,12 @@ func (m *Manager) ApplyGlobalOptions() error {
 	if len(opts) == 0 {
 		return nil
 	}
+	fmt.Printf("APPLY-OPTIONS: sending %v\n", opts)
 	if err := m.aria2.ChangeGlobalOption(opts); err != nil {
+		fmt.Printf("APPLY-OPTIONS: ERR %v\n", err)
 		return fmt.Errorf("应用 aria2 全局选项失败: %w", err)
 	}
+	fmt.Println("APPLY-OPTIONS: OK")
 	return nil
 }
 
