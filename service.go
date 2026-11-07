@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -403,4 +405,27 @@ func oneLine(s string) string {
 func errorJSON(msg string) string {
 	b, _ := json.Marshal(map[string]any{"ok": false, "error": msg})
 	return string(b)
+}
+
+// FetchURL 拉取 URL 文本内容（tracker 列表更新等设置页辅助用；经代理友好）。
+func (s *CoreService) FetchURL(url string) string {
+	if url == "" || !strings.HasPrefix(url, "http") {
+		return errorJSON("仅支持 http(s) URL")
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	resp, err := client.Do(req)
+	if err != nil {
+		return errorJSON("请求失败: " + err.Error())
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512<<10)) // 512KB 上限
+	if err != nil {
+		return errorJSON("读取失败: " + err.Error())
+	}
+	return marshalMust(map[string]any{"ok": true, "body": string(body)})
 }

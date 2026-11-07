@@ -286,6 +286,44 @@ function onSpeedChange() {
   save('downloadSpeedLimit', speedPreviewBytes.value)
 }
 
+// ---- BT Tracker 列表管理：一键从 best.txt 拉取、编辑、恢复默认 ----
+
+const TRACKER_SOURCE = 'https://cf.trackerslist.com/best.txt'
+const trackerBusy = ref(false)
+const trackerFlash = ref('')
+
+async function fetchTrackers() {
+  if (trackerBusy.value) return
+  trackerBusy.value = true
+  trackerFlash.value = ''
+  try {
+    const r = JSON.parse(await CoreService.FetchURL(TRACKER_SOURCE))
+    if (r.ok && r.body) {
+      // 每行一个 URL，去空行去注释
+      const list = r.body.split('\n').map((l: string) => l.trim()).filter((l: string) => l && !l.startsWith('#'))
+      if (list.length > 0) {
+        if (s.value) s.value.btTrackers = list.join('\n')
+        await save('btTrackers', s.value.btTrackers)
+        trackerFlash.value = `已更新 ${list.length} 个 tracker`
+      } else {
+        trackerFlash.value = '拉取结果为空'
+      }
+    } else {
+      trackerFlash.value = r.error ?? '拉取失败'
+    }
+  } catch (e) {
+    trackerFlash.value = String(e)
+  } finally {
+    trackerBusy.value = false
+  }
+}
+
+function clearTrackers() {
+  if (s.value) s.value.btTrackers = ''
+  save('btTrackers', '')
+  trackerFlash.value = '已清空（将使用内置默认列表）'
+}
+
 // ---- 下载引擎（普通下载：aria2-next + 内置 FTP；对位原版 DownloadEngineScreen，替代 Gopeed 占位）----
 
 const aria2 = ref<Aria2StatusInfo | null>(null)
@@ -988,11 +1026,22 @@ onMounted(() => {
            @click="s.btDhtEnabled = !s.btDhtEnabled; save('btDhtEnabled', s.btDhtEnabled)" />
       </div>
       <div class="field">
-        <label>Tracker 列表（每行一个 tracker URL）</label>
-        <textarea v-model="s.btTrackers" class="input trackers" rows="6"
-                  placeholder="https://tracker.example.com/announce" @change="save('btTrackers', s.btTrackers)" />
+        <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+          <label style="flex: none">Tracker 列表（每行一个 URL）</label>
+          <div class="row" style="gap: 6px">
+            <button class="btn tonal small" :disabled="trackerBusy" @click="fetchTrackers">
+              {{ trackerBusy ? '拉取中…' : '从 best.txt 更新' }}
+            </button>
+            <button class="btn text small" @click="clearTrackers">清空（用默认）</button>
+          </div>
+        </div>
+        <textarea v-model="s.btTrackers" class="input trackers" rows="8"
+                  placeholder="留空 = 使用内置 8 个精选公共 tracker（磁力开箱即用）；或点上方按钮一键拉取最新列表" @change="save('btTrackers', s.btTrackers)" />
+        <p v-if="trackerFlash" class="hint" style="margin: 6px 0 0; color: var(--primary)">{{ trackerFlash }}</p>
       </div>
-      <p class="hint" style="margin: 8px 0 0">每行一条，空行与 # 开头的注释行会被忽略</p>
+      <p class="hint" style="margin: 8px 0 0">
+        每行一条；留空时自动使用内置精选列表（<a :href="TRACKER_SOURCE" target="_blank" style="color: var(--primary)">cf.trackerslist.com/best.txt</a> 可一键更新）
+      </p>
     </div>
 
     <!-- 下载引擎（对位原版 DownloadEngineScreen，替代 Gopeed 占位）：aria2-next 状态 + 路径配置 -->

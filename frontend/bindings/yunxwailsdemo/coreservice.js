@@ -105,6 +105,15 @@ export function CloudPreviewURL(platform, fid, fname, fsize, fidToken) {
 }
 
 /**
+ * FetchURL 拉取 URL 文本内容（tracker 列表更新等设置页辅助用；经代理友好）。
+ * @param {string} url
+ * @returns {$CancellablePromise<string>}
+ */
+export function FetchURL(url) {
+    return $Call.ByID(360876507, url);
+}
+
+/**
  * HostStatus 宿主配置概览（设置页展示用）：代理（读正式设置）、ffmpeg 路径、机器标识可用性。
  * @returns {$CancellablePromise<string>}
  */
