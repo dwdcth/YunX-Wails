@@ -37,6 +37,18 @@ const remarkDraft = ref('')
 // 浏览器模式状态
 const browsing = ref<string | null>(null)
 const files = ref<ShareFile[]>([])
+// 大目录分块渲染：WebKit 一次性渲染数千行会触发绘制/合成问题（整屏空白），分批上屏
+const renderLimit = ref(300)
+const visibleFiles = computed(() => files.value.slice(0, renderLimit.value))
+
+// WebKitGTK 中段绘制丢失缓解：列表大替换后强制重新合成（对齐 App.vue 启动时的 paintKick）
+function paintKick() {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const el = document.documentElement
+    el.style.transform = 'translateZ(0)'
+    requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transform = '' }))
+  }))
+}
 const stack = ref<{ fid: string; name: string }[]>([])
 const listLoading = ref(false)
 const toast = ref('')
@@ -127,6 +139,8 @@ async function openDir(fid: string, name: string, replace = false) {
     const r = await cloudList(browsing.value, fid)
     if (r.ok && r.files) {
       files.value = r.files
+      renderLimit.value = 300
+      paintKick()
       if (replace) stack.value = [{ fid: r.dirFid, name: '根目录' }]
       else stack.value.push({ fid, name })
     } else {
@@ -140,6 +154,7 @@ async function openDir(fid: string, name: string, replace = false) {
 function enterPlatform(key: string) {
   browsing.value = key
   files.value = []
+  renderLimit.value = 300
   stack.value = []
   clearSel()
   openDir('', '', true)
@@ -176,7 +191,11 @@ async function reloadCurrent() {
   const cur = stack.value[stack.value.length - 1]
   if (!cur || !browsing.value) return
   const r = await cloudList(browsing.value, cur.fid).catch(() => null)
-  if (r?.ok && r.files) files.value = r.files
+  if (r?.ok && r.files) {
+    files.value = r.files
+    renderLimit.value = 300
+    paintKick()
+  }
 }
 
 // ---- 云盘视频/音频在线预览（cloud_link 取直链 → <video> 原生播放）----
@@ -350,7 +369,7 @@ onMounted(() => {
         <div v-if="listLoading" class="banner">加载目录…</div>
         <div v-else-if="files.length === 0" class="empty"><p>目录为空</p></div>
 
-        <div v-for="f in files" :key="f.fid" class="filerow">
+        <div v-for="f in visibleFiles" :key="f.fid" class="filerow">
           <span class="ck" :class="{ on: selected.has(f.fid) }" title="选中" @click="toggleSel(f.fid)">
             <AppIcon v-if="selected.has(f.fid)" name="check" :size="13" />
           </span>
@@ -372,6 +391,10 @@ onMounted(() => {
             <button class="btn text small" style="color: var(--error)" @click="doDelete(f)">删除</button>
           </template>
         </div>
+      </div>
+      <div v-if="visibleFiles.length < files.length" class="morebar">
+        已显示 {{ visibleFiles.length }} / {{ files.length }} 条（WebKit 大列表分批渲染防画丢）
+        <button class="btn tonal small" @click="renderLimit += 500">显示更多</button>
       </div>
       <DirPickerModal v-if="moving" :platform="browsing" title="移动到哪个文件夹？"
                       @confirm="doMove" @cancel="moving = null" />
@@ -492,4 +515,6 @@ onMounted(() => {
 .preview-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; height: 44px;
   box-sizing: border-box; }
 .preview-bar b { flex: 1; font-size: 14px; }
+.morebar { display: flex; align-items: center; gap: 12px; justify-content: center;
+  padding: 10px; color: var(--on-bg-variant); font-size: 13px; }
 </style>
