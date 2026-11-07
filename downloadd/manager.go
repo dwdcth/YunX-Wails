@@ -152,7 +152,12 @@ func globalOptionsFromSettings(s map[string]any) map[string]string {
 	if v, ok := s["btTrackers"].(string); ok {
 		if list := normalizeTrackerList(v); list != "" {
 			opts["bt-tracker"] = list
+		} else {
+			// 设置里没配 tracker 时用默认公共列表（磁力开箱即用；DHT 在代理环境下常不可达）
+			opts["bt-tracker"] = defaultTrackers
 		}
+	} else {
+		opts["bt-tracker"] = defaultTrackers
 	}
 	if v, ok := numberOf(s["maxConcurrentDownloads"]); ok && v > 0 {
 		opts["max-concurrent-downloads"] = strconv.FormatInt(v, 10)
@@ -166,6 +171,9 @@ func globalOptionsFromSettings(s map[string]any) map[string]string {
 	}
 	return opts
 }
+
+// defaultTrackers 默认公共 tracker 列表（用户未配置时兜底；精选稳定节点，HTTP+UDP 混合）
+const defaultTrackers = "http://tracker.opentrackr.org:1337/announce,udp://tracker.opentrackr.org:1337/announce,udp://open.tracker.cl:1337/announce,udp://tracker.openbittorrent.com:6969/announce,http://tracker.openbittorrent.com:6969/announce,udp://exodus.desync.com:6969/announce,udp://tracker.torrent.eu.org:451/announce,wss://tracker.openwebtorrent.com"
 
 // normalizeTrackerList 换行/逗号混排的 tracker 列表 → 去空去重的逗号串（aria2 bt-tracker 口径）。
 func normalizeTrackerList(v string) string {

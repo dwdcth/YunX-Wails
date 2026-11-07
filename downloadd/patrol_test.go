@@ -81,8 +81,9 @@ func TestGlobalOptionsFromSettings(t *testing.T) {
 
 func TestGlobalOptionsMissingKeysSkipped(t *testing.T) {
 	opts := globalOptionsFromSettings(map[string]any{"darkMode": float64(1)})
-	if len(opts) != 0 {
-		t.Errorf("无关键时不应产生选项: %v", opts)
+	// bt-tracker 有默认兜底（磁力开箱即用），其余无关键不应产生选项
+	if len(opts) != 1 || opts["bt-tracker"] == "" {
+		t.Errorf("无关键时只应有 bt-tracker 默认值: %v", opts)
 	}
 	// 限速 0 = 显式解除
 	opts = globalOptionsFromSettings(map[string]any{"downloadSpeedLimit": float64(0)})
