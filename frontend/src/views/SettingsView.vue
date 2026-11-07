@@ -253,6 +253,37 @@ async function doMirrorRefresh() {
   }
 }
 
+// ---- 全局限速输入：数值 + 单位下拉（KB/s · MB/s），底层仍存字节/秒 ----
+
+const speedUnit = ref<'B' | 'KB' | 'MB'>('MB')
+/** 当前单位下的显示值（从字节换算）；0 = 不限 */
+const speedInput = ref<number>(0)
+/** 输入换算回字节/秒存 settings */
+function speedToBytes(v: number, unit: string): number {
+  const u = unit.toUpperCase()
+  if (u === 'KB') return Math.round(v * 1024)
+  if (u === 'MB') return Math.round(v * 1024 * 1024)
+  return Math.round(v)
+}
+function bytesToSpeed(b: number): { v: number; unit: 'B' | 'KB' | 'MB' } {
+  if (b === 0) return { v: 0, unit: 'MB' }
+  if (b >= 1024 * 1024 && b % (1024 * 1024) === 0) return { v: b / (1024 * 1024), unit: 'MB' }
+  if (b >= 1024 && b % 1024 === 0) return { v: b / 1024, unit: 'KB' }
+  return { v: b, unit: 'B' }
+}
+/** 初始化显示值（设置加载后调） */
+function syncSpeedInput() {
+  const bytes = Number(s.value?.downloadSpeedLimit) || 0
+  const { v, unit } = bytesToSpeed(bytes)
+  speedInput.value = v
+  speedUnit.value = unit
+}
+/** 用户改动 → 换算回字节存库 */
+function onSpeedChange() {
+  if (s.value) s.value.downloadSpeedLimit = speedToBytes(speedInput.value || 0, speedUnit.value)
+  save('downloadSpeedLimit', speedToBytes(speedInput.value || 0, speedUnit.value))
+}
+
 // ---- 下载引擎（普通下载：aria2-next + 内置 FTP；对位原版 DownloadEngineScreen，替代 Gopeed 占位）----
 
 const aria2 = ref<Aria2StatusInfo | null>(null)
@@ -521,6 +552,7 @@ async function confirmLevel() {
 async function load() {
   try {
     s.value = await settingsList()
+    syncSpeedInput() // 限速输入框回显（字节→数值+单位）
     // 自定义主题色回显：设置优先，读不到时沿用 localStorage 缓存
     if (s.value && s.value.themeColorMode === 1 && s.value.themeSeedColor > 0) {
       pickedSeed.value = seedNumToHex(s.value.themeSeedColor)
@@ -625,12 +657,21 @@ onMounted(() => {
         </div>
       </div>
       <div class="row" style="margin-bottom: 12px">
-        <div class="field" style="flex: 1; min-width: 150px">
-          <label>全局限速（字节/秒，0 = 不限）</label>
-          <input class="input" type="number" min="0" v-model.number="s.downloadSpeedLimit"
-                 @change="save('downloadSpeedLimit', s.downloadSpeedLimit)" />
+        <div class="field" style="flex: 1; min-width: 220px">
+          <label>全局限速（0 = 不限）</label>
+          <div style="display: flex; gap: 8px; align-items: center">
+            <input class="input" type="number" min="0" step="0.5" style="flex: 1"
+                   v-model.number="speedInput" @change="onSpeedChange()" />
+            <select class="input" style="width: 90px" v-model="speedUnit" @change="onSpeedChange()">
+              <option value="B">B/s</option>
+              <option value="KB">KB/s</option>
+              <option value="MB">MB/s</option>
+            </select>
+          </div>
         </div>
-        <span style="flex: 1"></span>
+        <span class="hint" style="flex: 1; align-self: flex-end; padding-bottom: 6px">
+          = {{ fmtBytes(Number(s.downloadSpeedLimit) || 0) }}/s（{{ s.downloadSpeedLimit > 0 ? '已限速' : '不限速' }}）
+        </span>
       </div>
       <div class="row">
         <span style="flex: 1">下载期间阻止系统休眠</span>
