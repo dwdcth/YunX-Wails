@@ -201,6 +201,18 @@ export function NormalDownloadRemoveAll() {
 }
 
 /**
+ * NormalDownloadRemoveFile 移除任务并删除已下载的本地文件（云盘 download_remove 的
+ * deleteLocal 语义）。下载中任务先按现有移除流程停掉再删文件；aria2 侧优先 RPC
+ * aria2.removeDownloadFile、失败回退 Go 直删（详见 downloadd.Manager.RemoveFile）。
+ * 返回 {ok, error?}。
+ * @param {number} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function NormalDownloadRemoveFile(id) {
+    return $Call.ByID(2811440535, id);
+}
+
+/**
  * NormalDownloadResume 恢复任务（FTP 从断点续传）。
  * @param {number} id
  * @returns {$CancellablePromise<string>}
@@ -231,10 +243,11 @@ export function NormalDownloadShutdown() {
  * 返回 {ok, taskId, taskIds, engine, name, error?}；metalink 多文件时 taskIds 有多条。
  * @param {string} source
  * @param {string} saveDir
+ * @param {string} ifExists
  * @returns {$CancellablePromise<string>}
  */
-export function NormalDownloadSubmit(source, saveDir) {
-    return $Call.ByID(3853427577, source, saveDir);
+export function NormalDownloadSubmit(source, saveDir, ifExists) {
+    return $Call.ByID(3853427577, source, saveDir, ifExists);
 }
 
 /**
@@ -270,6 +283,26 @@ export function ParseShare(text) {
  */
 export function Ping() {
     return $Call.ByID(2464438806);
+}
+
+/**
+ * PluginList 插件清单。返回 {ok, plugins:[{id,name,version,match,file}], warnings?}。
+ * 丢新 .user.js 进插件目录后再次调用即可见（免重启）。
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginList() {
+    return $Call.ByID(2029151189);
+}
+
+/**
+ * PluginParse 用指定插件解析 url。返回插件契约 JSON：{ok, title?, links:[{url,name?,size?}], error?}。
+ * links 里的 url 由前端喂给 NormalDownloadSubmit（普通下载引擎）。
+ * @param {string} pluginId
+ * @param {string} url
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginParse(pluginId, url) {
+    return $Call.ByID(3279210048, pluginId, url);
 }
 
 /**

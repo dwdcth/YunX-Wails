@@ -44,6 +44,32 @@ const normalSuggestErr = ref('')
 const normalNotice = ref('')
 const normalBusy = ref(false)
 
+/** 同名文件确认弹窗状态 */
+const existsConfirm = ref<{ source: string; name: string; path: string } | null>(null)
+
+async function onExistsChoice(choice: 'overwrite' | 'rename' | 'skip') {
+  const c = existsConfirm.value
+  if (!c) return
+  existsConfirm.value = null
+  if (choice === 'skip') { flash('已跳过'); return }
+  normalBusy.value = true
+  try {
+    const r = await normalDownloadSubmit(c.source, '', choice)
+    if (r.ok && !r.exists) {
+      const which = r.taskIds && r.taskIds.length > 1 ? `${r.taskIds.length} 个任务` : `任务 #${r.taskId ?? ''}`
+      flash(`已加入普通下载（${which}），进度见下载页`)
+      normalNotice.value = r.name || c.source
+      setTimeout(() => (normalNotice.value = ''), 30_000)
+    } else {
+      error.value = r.error ?? '提交失败'
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    normalBusy.value = false
+  }
+}
+
 /** 提交普通下载：成功 toast + 顶部可跳下载页提示 */
 async function submitNormal(source: string) {
   if (normalBusy.value) return
@@ -51,6 +77,11 @@ async function submitNormal(source: string) {
   error.value = ''
   try {
     const r = await normalDownloadSubmit(source, '')
+    if (r.exists && r.existingPath) {
+      existsConfirm.value = { source, name: r.name || source, path: r.existingPath }
+      return
+    }
+    if (r.skipped) { flash('文件已存在，已跳过'); return }
     if (r.ok) {
       const which = r.taskIds && r.taskIds.length > 1
         ? `${r.taskIds.length} 个任务` : `任务 #${r.taskId ?? ''}`
@@ -785,6 +816,20 @@ Events.On('clipboard:link', (data: unknown) => {
       </div>
     </div>
   
+    <!-- 同名文件确认弹窗 -->
+    <div v-if="existsConfirm" class="mask" @click.self="existsConfirm = null">
+      <div class="dlg" style="width: min(480px, 92vw)">
+        <h3 style="margin: 0 0 8px">文件已存在</h3>
+        <p class="hint" style="word-break: break-all; margin: 0 0 6px">{{ existsConfirm.path }}</p>
+        <p class="hint" style="margin: 0 0 16px">要重新下载「{{ existsConfirm.name }}」吗？请选择处理方式：</p>
+        <div class="row" style="justify-content: flex-end; gap: 8px">
+          <button class="btn text small" @click="onExistsChoice('skip')">跳过</button>
+          <button class="btn tonal small" @click="onExistsChoice('rename')">重命名下载</button>
+          <button class="btn small" @click="onExistsChoice('overwrite')">覆盖下载</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 磁力下载对话框（迅雷式：元数据解析 → 选文件/改名 → 开始） -->
     <div v-if="magnetOpen" class="mask" @click.self="magnetOpen = false">
       <div class="dlg" style="width: min(560px, 92vw); max-height: 80vh; overflow: auto">

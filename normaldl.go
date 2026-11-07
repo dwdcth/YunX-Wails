@@ -80,14 +80,24 @@ func normalDLReady() (*downloadd.Manager, error) {
 // NormalDownloadSubmit 提交普通下载（source：http/https/ftp/ftps/magnet/ed2k 链接，
 // 本地或 URL 的 .torrent/.metalink 文件路径）。saveDir 空时用默认下载目录（核心 downloadDirUri）。
 // 返回 {ok, taskId, taskIds, engine, name, error?}；metalink 多文件时 taskIds 有多条。
-func (s *CoreService) NormalDownloadSubmit(source, saveDir string) (string, error) {
+func (s *CoreService) NormalDownloadSubmit(source, saveDir, ifExists string) (string, error) {
 	m, err := normalDLReady()
 	if err != nil {
 		return errorJSON(err.Error()), nil
 	}
-	res, err := m.Submit(source, saveDir)
+	res, err := m.SubmitOpts(source, saveDir, downloadd.SubmitOpts{IfExists: downloadd.IfExists(ifExists)})
 	if err != nil {
 		return errorJSON(err.Error()), nil
+	}
+	// exists=true：同名文件已存在，前端弹「覆盖/重命名/跳过」确认
+	if res.Exists {
+		return marshal(map[string]any{
+			"ok": true, "exists": true, "existingPath": res.ExistingPath,
+			"engine": res.Engine, "name": res.Name,
+		})
+	}
+	if res.Skipped {
+		return marshal(map[string]any{"ok": true, "skipped": true, "name": res.Name})
 	}
 	return marshal(map[string]any{
 		"ok": true, "taskId": res.TaskID, "taskIds": res.TaskIDs,
@@ -125,6 +135,14 @@ func (s *CoreService) NormalDownloadResume(id int64) (string, error) {
 // NormalDownloadRemove 移除任务（不删已下载文件——对齐云盘 remove 语义，删文件走前端单独入口）。
 func (s *CoreService) NormalDownloadRemove(id int64) (string, error) {
 	return normalDLOp(func(m *downloadd.Manager) error { return m.Remove(id) })
+}
+
+// NormalDownloadRemoveFile 移除任务并删除已下载的本地文件（云盘 download_remove 的
+// deleteLocal 语义）。下载中任务先按现有移除流程停掉再删文件；aria2 侧优先 RPC
+// aria2.removeDownloadFile、失败回退 Go 直删（详见 downloadd.Manager.RemoveFile）。
+// 返回 {ok, error?}。
+func (s *CoreService) NormalDownloadRemoveFile(id int64) (string, error) {
+	return normalDLOp(func(m *downloadd.Manager) error { return m.RemoveFile(id) })
 }
 
 // NormalDownloadPauseAll 全部暂停。

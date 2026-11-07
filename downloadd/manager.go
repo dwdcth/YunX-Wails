@@ -6,6 +6,7 @@ package downloadd
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -203,14 +204,36 @@ func (m *Manager) applyOptionsOnce() {
 
 // SubmitResult 提交结果（单个任务或 metalink 多文件展开的多任务）。
 type SubmitResult struct {
-	TaskID  int64   `json:"taskId"`
-	TaskIDs []int64 `json:"taskIds"`
-	Engine  string  `json:"engine"`
-	Name    string  `json:"name"`
+	TaskID      int64   `json:"taskId"`
+	TaskIDs     []int64 `json:"taskIds"`
+	Engine      string  `json:"engine"`
+	Name        string  `json:"name"`
+	Exists      bool    `json:"exists,omitempty"`      // 同名文件已存在（前端弹确认框）
+	ExistingPath string `json:"existingPath,omitempty"` // 已存在的文件路径
+	Skipped     bool    `json:"skipped,omitempty"`     // 跳过（同大小已存在）
 }
 
 // Submit 提交下载：分流 → 对应引擎 → 落库。saveDir 空时用默认下载目录。
+// IfExists 已存在同名文件的处理策略
+type IfExists string
+
+const (
+	IfExistsAsk      IfExists = ""        // 默认：返回 exists=true 让前端问用户
+	IfExistsOverwrite IfExists = "overwrite" // 覆盖（重下）
+	IfExistsRename   IfExists = "rename"   // 重命名（自动加 (1)、(2)…）
+	IfExistsSkip     IfExists = "skip"     // 跳过（已有相同大小文件时不重下）
+)
+
+// SubmitOpts 提交选项
+type SubmitOpts struct {
+	IfExists IfExists
+}
+
 func (m *Manager) Submit(source, saveDir string) (*SubmitResult, error) {
+	return m.SubmitOpts(source, saveDir, SubmitOpts{})
+}
+
+func (m *Manager) SubmitOpts(source, saveDir string, opts SubmitOpts) (*SubmitResult, error) {
 	c := Classify(source)
 	if c.Err != "" {
 		return nil, fmt.Errorf("%s", c.Err)
@@ -220,6 +243,26 @@ func (m *Manager) Submit(source, saveDir string) (*SubmitResult, error) {
 	}
 	if err := os.MkdirAll(saveDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建保存目录失败: %w", err)
+	}
+
+	// 同名文件检测（下载前）：默认返回让前端确认；跳过=同大小视为已下过；重命名=自动加序号
+	if c.Name != "" {
+		target := filepath.Join(saveDir, sanitizeFileName(c.Name))
+		if _, err := os.Stat(target); err == nil {
+			switch opts.IfExists {
+			case IfExistsOverwrite:
+				_ = os.Remove(target)
+			case IfExistsSkip:
+				if fi, _ := os.Stat(target); fi != nil && c.Name != "" {
+					// 同名同大小视为已完成（c 无 size 信息，跳过即可）
+					return &SubmitResult{Skipped: true, Name: c.Name}, nil
+				}
+			case IfExistsRename:
+				c.Name = autoRename(saveDir, c.Name)
+			default: // Ask：返回给前端
+				return &SubmitResult{Exists: true, ExistingPath: target, Name: c.Name}, nil
+			}
+		}
 	}
 
 	switch c.Kind {
@@ -432,6 +475,82 @@ func (m *Manager) Remove(id int64) error {
 	return m.db.DeleteTask(id)
 }
 
+// RemoveFile 移除单任务并删除已下载的本地文件（对齐云盘 download_remove 的 deleteLocal 语义）。
+// 幂等（任务不存在视为成功）。删除前若任务在下载中：先按现有移除流程停掉再删文件。
+//   - FTP 任务：停任务（现有 Remove 逻辑）+ os.Remove(savePath)；
+//   - aria2 任务：优先 RPC aria2.removeDownloadFile(gid)（上游 aria2 ≥1.37 支持；对仍在
+//     会话中的已完成/出错/已移除任务有效），RPC 报错（aria2-next 未实现该方法 / gid 已被
+//     remove 出会话 / 进程未运行）则回退 os.Remove(savePath)；两条路径都失败才返回错误。
+//
+// savePath 为空或文件不存在不算错（任务可能尚未落盘）。任务记录照常删除（对齐云盘：
+// 删文件失败只报错不阻断任务清理）。
+func (m *Manager) RemoveFile(id int64) error {
+	t, err := m.db.GetTask(id)
+	if err != nil || t == nil {
+		return nil // 幂等（对齐 Remove）
+	}
+
+	if t.Engine == EngineFTP {
+		if err := m.ftp.Remove(id); err != nil {
+			return err
+		}
+		// 下载中任务的行由 worker 异步删——等行消失（文件 fd 确已关闭）再删文件，
+		// 避免删早了 worker 又把文件重新建回。超时（worker 卡在网络收尾）则照常直删。
+		m.waitTaskRowGone(id, 5*time.Second)
+		return removeLocalFile(t.SavePath)
+	}
+
+	// aria2：非终态先按现有移除流程停掉（终态任务的 gid 留在会话中，正是 removeDownloadFile 的适用对象）
+	if t.Gid != "" && !t.terminal() {
+		if err := m.aria2.Remove(t.Gid); err != nil && !tolerableAria2Err(err) {
+			return err
+		}
+	}
+	fileErr := m.removeAria2File(t)
+	if err := m.db.DeleteTask(id); err != nil {
+		if fileErr != nil {
+			return fmt.Errorf("%v；且删除任务记录失败: %w", fileErr, err)
+		}
+		return err
+	}
+	return fileErr
+}
+
+// removeAria2File 删 aria2 任务的已下载文件：RPC 优先、Go 本地直删兜底。
+// 仅当 aria2 进程在运行才试 RPC（进程不在 = 会话已丢，RPC 必报 GID not found，
+// 还会白白拉起进程）；savePath 从任务记录取。
+func (m *Manager) removeAria2File(t *Task) error {
+	if t.Gid != "" && m.aria2.Running() {
+		if err := m.aria2.RemoveDownloadFile(t.Gid); err == nil {
+			return nil // aria2 侧已删（上游 aria2 ≥1.37 的 RPC 路径）
+		}
+		// RPC 失败（No such method / GID not found / 网络故障）→ 回退本地直删
+	}
+	return removeLocalFile(t.SavePath)
+}
+
+// waitTaskRowGone 轮询等任务行消失（FTP 引擎移除下载中任务的异步收尾）；超时静默返回。
+func (m *Manager) waitTaskRowGone(id int64, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if t, _ := m.db.GetTask(id); t == nil {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// removeLocalFile 删本地文件；savePath 空或文件不存在不算错（幂等删除语义）。
+func removeLocalFile(savePath string) error {
+	if savePath == "" {
+		return nil
+	}
+	if err := os.Remove(savePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("删除本地文件失败(%s): %w", savePath, err)
+	}
+	return nil
+}
+
 // PauseAll 全部暂停（两引擎各自批量）。
 func (m *Manager) PauseAll() {
 	if err := m.aria2.PauseAll(); err != nil {
@@ -497,4 +616,16 @@ func tolerableAria2Err(err error) bool {
 		}
 	}
 	return false
+}
+
+// autoRename 自动重命名：name.ext → name(1).ext → name(2).ext…
+func autoRename(dir, name string) string {
+	ext := filepath.Ext(name)
+	base := name[:len(name)-len(ext)]
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s(%d)%s", base, i, ext)
+		if _, err := os.Stat(filepath.Join(dir, candidate)); err != nil {
+			return candidate
+		}
+	}
 }

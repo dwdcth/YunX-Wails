@@ -145,12 +145,15 @@ export interface NormalSubmitResult {
   taskId?: number
   taskIds?: number[] // metalink 多文件展开时有多条
   engine?: string
+  exists?: boolean // 同名文件已存在（需用户确认覆盖/重命名/跳过）
+  existingPath?: string
+  skipped?: boolean
   name?: string
   error?: string
 }
 
-export async function normalDownloadSubmit(source: string, saveDir = ''): Promise<NormalSubmitResult> {
-  return JSON.parse(await CoreService.NormalDownloadSubmit(source, saveDir))
+export async function normalDownloadSubmit(source: string, saveDir = '', ifExists = ''): Promise<NormalSubmitResult> {
+  return JSON.parse(await CoreService.NormalDownloadSubmit(source, saveDir, ifExists))
 }
 
 export interface NormalListResult { ok: boolean; tasks?: NormalTask[]; error?: string }
@@ -172,6 +175,17 @@ export function normalDownloadResume(id: number): Promise<NormalOpResult> {
 /** 移除任务（不删已下载文件——对齐云盘 remove 语义） */
 export function normalDownloadRemove(id: number): Promise<NormalOpResult> {
   return JSON.parse(CoreService.NormalDownloadRemove(id))
+}
+
+/** 移除任务并删除已下载的本地文件（云盘 downloadRemove 的 deleteLocal 语义，行菜单「删除任务+文件」用）。
+ *  下载中任务先停再删；aria2 侧优先 RPC 删文件、失败回退 Go 直删。 */
+export async function normalDownloadRemoveFile(id: number): Promise<NormalOpResult> {
+  // bindings 未再生前防御式调用（对齐 shutdownNow 的写法）；主控 regen bindings 后自动走专用方法
+  const svc = CoreService as unknown as { NormalDownloadRemoveFile?: (id: number) => Promise<string> }
+  if (typeof svc.NormalDownloadRemoveFile === 'function') {
+    return JSON.parse(await svc.NormalDownloadRemoveFile(id))
+  }
+  return { ok: false, error: 'NormalDownloadRemoveFile 绑定尚未生成（需重新生成 bindings）' }
 }
 
 export function normalDownloadPauseAll(): Promise<NormalOpResult> {
