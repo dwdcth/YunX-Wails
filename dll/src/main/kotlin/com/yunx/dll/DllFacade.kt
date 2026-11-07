@@ -395,6 +395,8 @@ object DllFacade {
                             JSONObject()
                                 .put("taskId", t.id)
                                 .put("fileName", t.fileName)
+                                // 创建时间（Unix 秒，与普通下载库同单位）：前端页签/时间排序用
+                                .put("createdAt", t.createTime / 1000)
                                 .put("status", t.status)
                                 .put("statusText", DownloadTaskEntity.statusText(t.status))
                                 .put("total", t.totalSize)

@@ -6,6 +6,8 @@
 // 扩展：行复选多选批量操作 / 全局批量栏（全部暂停/开始/删除，同时作用两个引擎）/ 按目录分组 /
 // 行内 ⋯ 菜单（复制链接/重新下载/打开文件）/ ffmpeg 合轨进度（download_list stats.mergePercent 橙色条）/
 // 文件夹批量任务（share_folder_download 的 batch_list 轮询）/ 下载调试弹窗（仅云盘任务；对齐原版 DownloadDebugScreen）。
+// 列表工具栏（迅雷式）：状态页签（全部/下载中/失败/完成，带计数）+ 文件名搜索 + 排序（时间/文件名/大小·升降序），
+// 管线顺序 = 页签过滤 → 搜索 → 排序 → 分组（组内按当前排序，组间按组内最新任务时间倒序）。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   batchList, downloadDebugExport, downloadDebugInfo, downloadGetLink, downloadList,
@@ -50,6 +52,7 @@ const grouped = ref(false)
 const batches = ref<BatchTask[]>([])
 
 let prevTaskCount = 0
+let prevVisibleCount = 0
 async function refresh() {
   try {
     const r = await downloadListFull()
@@ -70,15 +73,18 @@ async function refresh() {
   try {
     batches.value = await batchList()
   } catch { /* 批量接口失败不影响任务列表展示 */ }
-  // WebKitGTK 在内容高度骤减时可能不自动钳制滚动位置 → 手动重置
+  // WebKitGTK 在内容高度骤减时可能不自动钳制滚动位置 → 手动重置。
+  // 双口径：任务总数减少，或「过滤后可见行数减少」（任务离开当前页签 / 搜索命中变化）都触发
   const count = tasks.value.length + normalTasks.value.length
-  if (count < prevTaskCount) {
+  const visible = visibleRows.value.length
+  if (count < prevTaskCount || visible < prevVisibleCount) {
     requestAnimationFrame(() => {
       const el = document.querySelector('.content')
       if (el) el.scrollTop = 0
     })
   }
   prevTaskCount = count
+  prevVisibleCount = visible
 }
 
 // ---- 双引擎合并行模型：云盘任务与普通任务归一成一套字段，行内操作按来源路由 ----
@@ -101,6 +107,8 @@ interface MergedRow {
   engine: string // 普通任务引擎标签：aria2-next / FTP
   error: string
   url: string // 普通任务原始链接（复制链接用；磁力/种子即其本体）
+  sortTime: number // 排序时间戳（Unix 秒：云盘 = download_list createdAt；普通 = createdAt；缺失回退 0，
+  // 由后端 createTime 倒序 + 稳定排序保住云盘任务内部「最新在前」的相对顺序）
 }
 
 function cloudRow(t: DownloadTask): MergedRow {
@@ -109,6 +117,7 @@ function cloudRow(t: DownloadTask): MergedRow {
     statusCode: t.status, statusText: t.statusText, total: t.total, downloaded: t.downloaded,
     speed: t.speed, avgSpeed: t.avgSpeed, remainMillis: t.remainMillis,
     savePath: t.savePath ?? '', platform: t.platform ?? '', engine: '', error: t.error ?? '', url: '',
+    sortTime: t.createdAt ?? 0,
   }
 }
 
@@ -121,7 +130,7 @@ function normalRow(t: NormalTask): MergedRow {
     statusCode: normalStatusCode(t.status), statusText: NORMAL_STATUS_TEXT[t.status] ?? t.status,
     total: t.size, downloaded: t.downloaded, speed: t.speed, avgSpeed: 0, remainMillis: remain,
     savePath: t.savePath ?? '', platform: '', engine: t.engine === 'ftp' ? 'FTP' : 'aria2-next',
-    error: t.err ?? '', url: t.url,
+    error: t.err ?? '', url: t.url, sortTime: t.createdAt,
   }
 }
 
@@ -130,6 +139,64 @@ const rows = computed<MergedRow[]>(() => [
   ...tasks.value.map(cloudRow),
   ...normalTasks.value.map(normalRow),
 ])
+
+// ---- 列表工具栏（迅雷式多页签）：状态页签 → 文件名搜索 → 排序，依次过滤后进分组 ----
+
+type TabKey = 'all' | 'active' | 'error' | 'done'
+type SortKey = 'time' | 'name' | 'size'
+
+/** 下载中 = 等待 + 下载中 + 已暂停（含暂停便于恢复）；失败 / 完成 各自独立页签 */
+const TABS: { key: TabKey; label: string; match: (s: number) => boolean }[] = [
+  { key: 'all', label: '全部', match: () => true },
+  { key: 'active', label: '下载中', match: (s) => s === 0 || s === 1 || s === 2 },
+  { key: 'error', label: '下载失败', match: (s) => s === 4 },
+  { key: 'done', label: '下载完成', match: (s) => s === 3 },
+]
+
+const activeTab = ref<TabKey>('all')
+const search = ref('')
+const sortKey = ref<SortKey>('time') // 默认时间·降序（最新在前）
+const sortDesc = ref(true)
+
+function tabCount(key: TabKey): number {
+  const tab = TABS.find((t) => t.key === key)
+  return tab ? rows.value.filter((r) => tab.match(r.statusCode)).length : 0
+}
+
+/** 排序比较器：时间用 sortTime（缺失回退 0，稳定排序保持后端倒序）；文件名 localeCompare('zh')；大小取 total */
+function cmpRow(a: MergedRow, b: MergedRow): number {
+  let d = 0
+  if (sortKey.value === 'name') d = a.fileName.localeCompare(b.fileName, 'zh')
+  else if (sortKey.value === 'size') d = a.total - b.total
+  else d = a.sortTime - b.sortTime
+  return sortDesc.value ? -d : d
+}
+
+/** 可见行管线：页签状态过滤 → 文件名模糊搜索（大小写不敏感）→ 排序 */
+const visibleRows = computed<MergedRow[]>(() => {
+  const tab = TABS.find((t) => t.key === activeTab.value) ?? TABS[0]
+  const q = search.value.trim().toLowerCase()
+  return rows.value
+    .filter((r) => tab.match(r.statusCode) && (!q || r.fileName.toLowerCase().includes(q)))
+    .sort(cmpRow)
+})
+
+function onSortKeyChange(e: Event) {
+  const v = (e.target as HTMLSelectElement).value
+  sortKey.value = v === 'name' || v === 'size' ? v : 'time'
+}
+
+/** 页签各自空文案（与「暂无下载任务」的全局空态区分；有搜索词时优先提示搜索无结果） */
+const emptyText = computed(() => {
+  const q = search.value.trim()
+  if (q) return `没有匹配「${q}」的任务`
+  return {
+    all: '当前筛选下没有任务',
+    active: '没有下载中的任务',
+    error: '没有下载失败的任务',
+    done: '没有已完成的任务',
+  }[activeTab.value]
+})
 
 /** 行内操作按来源路由（暂停/继续/删除；删除对已完成云盘任务连带删本地文件，普通任务一律不删） */
 function pauseRow(row: MergedRow) {
@@ -333,20 +400,23 @@ function dirOfPath(p: string): string {
   return i > 0 ? p.slice(0, i) : p
 }
 
+/** 按目录分组：组内保持当前排序（插入序即排序序），组间按组内最新任务时间倒序 */
 const groups = computed(() => {
   const m = new Map<string, MergedRow[]>()
-  for (const row of rows.value) {
+  for (const row of visibleRows.value) {
     const d = dirOfPath(row.savePath) || '（未知目录）'
     const list = m.get(d) ?? []
     list.push(row)
     m.set(d, list)
   }
-  return [...m.entries()].map(([dir, list]) => ({ dir, list }))
+  return [...m.entries()]
+    .map(([dir, list]) => ({ dir, list, newest: Math.max(...list.map((r) => r.sortTime)) }))
+    .sort((a, b) => b.newest - a.newest)
 })
 
 /** 统一分段：分组=按目录切段（带标题），平铺=单段（无标题），行渲染只写一份 */
 const sections = computed(() =>
-  grouped.value ? groups.value : [{ dir: '', list: rows.value }])
+  grouped.value ? groups.value : [{ dir: '', list: visibleRows.value }])
 
 function batchPct(b: BatchTask): number {
   return b.total > 0 ? Math.min(100, Math.round((b.done / b.total) * 100)) : 0
@@ -701,7 +771,7 @@ onUnmounted(() => {
     <!-- 全局批量栏：与勾选无关，任务存在即显示（同时作用云盘引擎与普通下载引擎） -->
     <div v-if="rows.length > 0" class="card" style="padding: 10px 20px">
       <div class="row" style="justify-content: space-between">
-        <span style="font-weight: 600">全部任务（{{ rows.length }}）</span>
+        <span style="font-weight: 600">全部任务（{{ rows.length }} · 网盘 {{ tasks.length }} / 普通 {{ normalTasks.length }}）</span>
         <span class="row">
           <span class="row" style="gap: 8px; font-size: 13px" title="两个引擎的全部任务结束后弹出倒计时关机">
             完成后关机
@@ -728,11 +798,32 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 列表控制：按目录分组（两库任务统一按 savePath 所在目录分组） -->
+    <!-- 列表工具栏：状态页签（迅雷式，带计数）+ 文件名搜索 + 排序 + 按目录分组（两库任务统一按 savePath 所在目录分组） -->
     <div v-if="rows.length > 0" class="card" style="padding: 10px 20px">
-      <div class="row" style="justify-content: space-between">
-        <span>按目录分组（savePath 所在目录）· 网盘 {{ tasks.length }} / 普通 {{ normalTasks.length }}</span>
-        <i class="switch" :class="{ on: grouped }" @click="grouped = !grouped" />
+      <div class="row" style="justify-content: space-between; gap: 10px">
+        <div class="tabs">
+          <button v-for="t in TABS" :key="t.key" class="tab" :class="{ on: activeTab === t.key }"
+                  @click="activeTab = t.key">
+            {{ t.label }}<span class="cnt">{{ tabCount(t.key) }}</span>
+          </button>
+        </div>
+        <span class="row" style="gap: 8px; flex: none; flex-wrap: wrap">
+          <span class="searchbox">
+            <input v-model="search" placeholder="搜索文件名" />
+            <button v-if="search" class="clear" title="清空搜索" @click="search = ''">✕</button>
+          </span>
+          <select class="sortsel" :value="sortKey" title="排序方式" @change="onSortKeyChange">
+            <option value="time">时间</option>
+            <option value="name">文件名</option>
+            <option value="size">大小</option>
+          </select>
+          <button class="btn tonal small" style="min-width: 34px"
+                  :title="sortDesc ? '当前降序，点击切换为升序' : '当前升序，点击切换为降序'"
+                  @click="sortDesc = !sortDesc">{{ sortDesc ? '↓' : '↑' }}</button>
+          <span class="row" style="gap: 6px; font-size: 13px" title="按 savePath 所在目录分组（两库任务统一分组）">
+            分组<i class="switch" :class="{ on: grouped }" @click="grouped = !grouped" />
+          </span>
+        </span>
       </div>
     </div>
 
@@ -744,6 +835,13 @@ onUnmounted(() => {
         <div class="big">⬇️</div>
         <h3 style="margin: 0 0 6px">暂无下载任务</h3>
         <p>内置分片引擎（网盘直链，32 线程 / Range 分片 / 断点续传）与普通下载引擎（aria2-next：磁力 / BT / ed2k / Metalink；内置 FTP）均已就绪。</p>
+      </div>
+    </div>
+
+    <!-- 页签内空态：有任务但当前页签/搜索筛不出来（与上面的全局空态区分） -->
+    <div v-else-if="visibleRows.length === 0" class="card" style="padding: 10px 20px">
+      <div class="empty" style="padding: 16px 0">
+        <p style="margin: 0">{{ emptyText }}</p>
       </div>
     </div>
 
@@ -949,6 +1047,29 @@ onUnmounted(() => {
   cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center;
   color: var(--on-primary); }
 .ck.on { background: var(--primary); border-color: var(--primary); }
+
+/* 列表工具栏：状态页签（胶囊选中态，对齐设置页 .seg / 侧栏 rail-pill 风格）+ 搜索框 + 排序下拉 */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.tab { border: none; border-radius: 16px; padding: 5px 13px; font-size: 13px; cursor: pointer;
+  background: transparent; color: var(--on-bg-variant);
+  display: inline-flex; align-items: center; gap: 6px; }
+.tab:hover { background: var(--surface-container); }
+.tab.on { background: var(--primary-container); color: var(--on-primary-container); font-weight: 600; }
+.tab .cnt { font-size: 11.5px; line-height: 17px; padding: 0 6px; border-radius: 9px;
+  background: var(--surface-container-high); color: var(--on-bg-variant); font-weight: 500; }
+.tab.on .cnt { background: color-mix(in srgb, var(--on-primary-container) 16%, transparent); }
+.searchbox { position: relative; display: inline-flex; align-items: center; }
+.searchbox input { border: 1px solid var(--outline-variant); border-radius: 16px; outline: none;
+  background: var(--surface-container); color: var(--on-bg);
+  padding: 5px 30px 5px 14px; font-size: 13px; width: 168px; }
+.searchbox input:focus { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.searchbox .clear { position: absolute; right: 5px; width: 20px; height: 20px; border: none;
+  border-radius: 50%; background: transparent; color: var(--on-bg-variant);
+  font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.searchbox .clear:hover { background: var(--surface-container-high); color: var(--on-bg); }
+.sortsel { border: 1px solid var(--outline-variant); border-radius: 16px; outline: none;
+  background: var(--surface); color: var(--on-bg); padding: 5px 8px; font-size: 13px; cursor: pointer; }
+.sortsel:focus { border-color: var(--primary); }
 
 /* ffmpeg 合轨阶段：进度条变橙 + 「合并中 X%」标签 */
 .bar.mergebar i { background: #E8590C; }

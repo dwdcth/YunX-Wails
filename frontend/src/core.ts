@@ -45,6 +45,7 @@ export async function coreVersion(): Promise<{ version: string; preview: boolean
 export interface DownloadTask {
   taskId: number
   fileName: string
+  createdAt?: number // 创建时间 Unix 秒（下载页时间排序）
   status: number // 0等待 1下载中 2已暂停 3已完成 4失败
   statusText: string
   total: number
