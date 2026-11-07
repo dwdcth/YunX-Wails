@@ -159,14 +159,10 @@ func (a *Aria2) ensureRunning() error {
 		"--allow-overwrite=false",
 		"--auto-file-renaming=false",
 	}
-	// 系统代理透传（Mihomo/Clash 等 Fake-IP 环境下 BT/DHT 的 UDP 不走代理管道，
-	// 显式传 --all-proxy 让 aria2 经代理解决 peer/tracker 连通性）
-	if a.proxyFn != nil {
-		if proxy := a.proxyFn(); proxy != "" {
-			args = append(args, fmt.Sprintf("--all-proxy=%s", proxy))
-			fmt.Printf("aria2-next 代理: %s\n", proxy)
-		}
-	}
+	// ★ 不传 --all-proxy：实测 Mihomo TUN/Fake-IP 环境下显式代理会毒死 BT peer 连接
+	//   （peer 是原始 TCP 连接不走 HTTP 代理，代理导致连接失败速度恒 0）。
+	//   HTTP 直链下载走系统路由（TUN 已处理）；需要代理时由 changeGlobalOption 按需设。
+	_ = a.proxyFn // 保留字段供未来按类型选择性代理
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
