@@ -53,6 +53,7 @@ func Init(dataDir string, hooks Hooks) (*Manager, error) {
 	}
 	m := &Manager{dataDir: dataDir, db: db, hooks: hooks}
 	m.aria2 = NewAria2(db, dataDir, Aria2Hooks{KvGet: hooks.KvGet, DefaultDir: m.DefaultDir})
+	m.aria2.onExit = m.watchAria2Exit // 进程重启后重新应用限速
 	m.ftp = NewFTPEngine(db)
 	// FTP 引擎注入全局限速读取器（从正式设置拉，30s 缓存）
 	ftpLimitCache := struct {
@@ -230,13 +231,20 @@ func (m *Manager) ApplyGlobalOptions() error {
 	return nil
 }
 
-// applyOptionsOnce 本轮进程生命周期内首次成功提交 aria2 任务后，把设置同步过去（失败不打断下载）。
+// applyOptionsOnce aria2 进程启动后的首个操作前，把设置同步过去（失败不打断下载）。
+// aria2 进程重启后 flag 被重置（见 watchAria2Exit），下次操作前重新应用。
 func (m *Manager) applyOptionsOnce() {
 	if m.optsApplied.Load() {
 		return
 	}
 	m.optsApplied.Store(true)
 	_ = m.ApplyGlobalOptions()
+}
+
+// watchAria2Exit aria2 进程退出时重置 optsApplied（下次拉起时重新应用限速等）。
+// 由 Aria2 的退出监测回调触发。
+func (m *Manager) watchAria2Exit() {
+	m.optsApplied.Store(false)
 }
 
 // SubmitResult 提交结果（单个任务或 metalink 多文件展开的多任务）。
@@ -480,6 +488,8 @@ func (m *Manager) retryAria2(t *Task) error {
 	if t.Gid != "" {
 		_ = m.aria2.Remove(t.Gid)
 	}
+	// 重试 = aria2 可能刚重启 → 应用全局选项（限速等）
+	m.applyOptionsOnce()
 	// ★ 重试不走 SubmitOpts 的 IfExists 检测——半成品文件就是要续传的状态，
 	//   删了会丢失已下载数据（aria2 --continue=true 按已有文件大小续传）
 	c := Classify(t.URL)

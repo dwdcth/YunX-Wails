@@ -44,6 +44,7 @@ type Aria2 struct {
 
 	cmd      *exec.Cmd
 	cmdDone  chan struct{} // 监测协程 Wait 收尸后关闭（Shutdown 等它，绝不并发 Wait）
+	onExit   func()        // 进程退出时通知 Manager（重置 optsApplied）
 	running  bool
 	stopped  bool // Shutdown 后不再自启
 	port     int
@@ -178,6 +179,9 @@ func (a *Aria2) ensureRunning() error {
 		}
 		a.mu.Unlock()
 		close(done)
+		if a.onExit != nil {
+			runCatchingGo(a.onExit)
+		}
 		// 意外退出才提示（Shutdown 主动终止拿到 signal: terminated 属正常）
 		if err != nil && wasCurrent {
 			fmt.Printf("aria2-next 退出: %v\n", err)
@@ -553,4 +557,9 @@ func (a *Aria2) fillPath(id int64, st aria2Status) {
 func (a *Aria2) rpcAlive(url, secret string) bool {
 	_, err := a.postRPC(url, secret, "aria2.getVersion")
 	return err == nil
+}
+
+func runCatchingGo(f func()) {
+	defer func() { _ = recover() }()
+	f()
 }
