@@ -16,12 +16,12 @@ const PLATFORMS = [
   { key: 'quark', name: '夸克网盘', color: '#3B82F6', canDl: true, paste: 'Cookie（浏览器 F12 → 网络 → 任意请求的 Cookie 头）' },
   { key: 'uc', name: 'UC网盘', color: '#F97316', canDl: true, paste: 'Cookie' },
   { key: 'xunlei', name: '迅雷云盘', color: '#1E40AF', canDl: false, paste: '网页凭据串（原版网页登录导出的原始串）' },
-  { key: 'baidu', name: '百度网盘', color: '#2563EB', canDl: false, paste: 'Cookie（需含 STOKEN/BDUSS）' },
-  { key: 'c139', name: '移动云盘', color: '#0891C2', canDl: false, paste: 'Cookie（需含 Authorization）' },
-  { key: 'pan123', name: '123云盘', color: '#7C3AED', canDl: false, paste: '' },
-  { key: 'pan115', name: '115网盘', color: '#0D9488', canDl: false, paste: 'Cookie（需含 UID/CID/SEID）' },
-  { key: 'guangya', name: '光鸭云盘', color: '#D97706', canDl: false, paste: '' },
-  { key: 'ilanzou', name: '蓝奏云优享版', color: '#BE185D', canDl: false, paste: '' },
+  { key: 'baidu', name: '百度网盘', color: '#2563EB', canDl: true, paste: 'Cookie（需含 STOKEN/BDUSS）' },
+  { key: 'c139', name: '移动云盘', color: '#0891C2', canDl: true, paste: 'Cookie（需含 Authorization）' },
+  { key: 'pan123', name: '123云盘', color: '#7C3AED', canDl: true, paste: '' },
+  { key: 'pan115', name: '115网盘', color: '#0D9488', canDl: true, paste: 'Cookie（需含 UID/CID/SEID）' },
+  { key: 'guangya', name: '光鸭云盘', color: '#D97706', canDl: true, paste: '' },
+  { key: 'ilanzou', name: '蓝奏云优享版', color: '#BE185D', canDl: true, paste: '' },
   { key: 'lanzou', name: '蓝奏云', color: '#DB2777', canDl: true, paste: 'Cookie（需含 ylogin 与 phpdisk_info）' },
 ]
 
