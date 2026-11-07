@@ -297,7 +297,16 @@ object CloudGateway {
 
     // ---- 个人盘直链下载（夸克/UC/蓝奏经典）----
 
-    suspend fun downloadLink(platform: SharePlatform, file: ShareFile): DownloadLink = when (platform) {
+    suspend fun downloadLink(platform: SharePlatform, file: ShareFile): DownloadLink {
+        val raw = downloadLinkRaw(platform, file)
+        // 文件名兜底（全平台契约）：C139 等取链响应不含 name（core 注释明确「由调用方用列表
+        // name 填充」），空名会被下载引擎从 URL 推导成 fileId/hash——一律回落到列表真实名。
+        return if (raw.filename.isBlank() || raw.filename == file.fid) {
+            raw.copy(filename = file.fname)
+        } else raw
+    }
+
+    private suspend fun downloadLinkRaw(platform: SharePlatform, file: ShareFile): DownloadLink = when (platform) {
         SharePlatform.QUARK ->
             rg.quarkApi.getDownloadLink(file.fid, requireQuarkCookie())
                 ?: throw IllegalStateException("取直链失败")
