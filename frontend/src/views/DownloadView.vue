@@ -1142,7 +1142,7 @@ onUnmounted(() => {
                 <button class="menuitem" @click="copyLink(row)">复制链接</button>
                 <button v-if="row.cloud && row.statusCode === 4" class="menuitem" @click="redownload(row)">重新下载</button>
                 <button v-if="row.cloud && downloadDebugOn" class="menuitem" @click="openDebug(row)">调试信息</button>
-                <button v-if="row.statusCode === 3 && row.savePath" class="menuitem" @click="openDirectory(row)">打开目录</button>
+                <button v-if="row.savePath" class="menuitem" @click="openDirectory(row)">打开目录</button>
                 <button v-if="row.statusCode === 3 && row.savePath" class="menuitem" @click="openFile(row)">打开文件</button>
               </div>
             </span>
