@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"yunxwailsdemo/downloadd"
+	"yunxwailsdemo/hostenv"
 )
 
 // normalDL 进程级普通下载管理器（main 里 normalDownloadInit 注入；测试可不注入）。
@@ -35,6 +36,31 @@ func normalDownloadInit(s *CoreService) {
 			}
 		}
 		m, err := downloadd.Init(dataDir, downloadd.Hooks{
+			// 系统代理探测（aria2 --all-proxy 用）：应用设置的手动代理 > 环境变量 > GNOME gsettings
+			Proxy: func() string {
+				// 1. 应用正式设置的手动代理
+				if raw, err := s.coreCall(`{"cmd":"settings_list"}`); err == nil {
+					var r struct {
+						OK       bool           `json:"ok"`
+						Settings map[string]any `json:"settings"`
+					}
+					if json.Unmarshal([]byte(raw), &r) == nil && r.OK {
+						if mode, _ := r.Settings["proxyMode"].(string); mode == "manual" {
+							host, _ := r.Settings["proxyHost"].(string)
+							port := 0
+							if v, ok := r.Settings["proxyPort"].(float64); ok { port = int(v) }
+							if host != "" && port > 0 {
+								return fmt.Sprintf("http://%s:%d", host, port)
+							}
+						}
+					}
+				}
+				// 2. 环境变量 / GNOME（hostenv 已有探测）
+				if h, p := hostenv.ResolveSystemProxy(); h != "" && p > 0 {
+					return fmt.Sprintf("http://%s:%d", h, p)
+				}
+				return ""
+			},
 			// 经核心通道读 KV（settings.aria2Path 等）；核心惰性初始化，首次调用才真正加载
 			KvGet: func(key string) (string, bool) {
 				if err := s.ensureCore(); err != nil {

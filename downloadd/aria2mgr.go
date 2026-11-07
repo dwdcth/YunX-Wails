@@ -45,6 +45,7 @@ type Aria2 struct {
 	cmd      *exec.Cmd
 	cmdDone  chan struct{} // 监测协程 Wait 收尸后关闭（Shutdown 等它，绝不并发 Wait）
 	onExit   func()        // 进程退出时通知 Manager（重置 optsApplied）
+	proxyFn  func() string // 系统代理 URL（如 http://127.0.0.1:7890）；空=不走代理
 	running  bool
 	stopped  bool // Shutdown 后不再自启
 	port     int
@@ -147,7 +148,7 @@ func (a *Aria2) ensureRunning() error {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(bin,
+	args := []string{
 		"--enable-rpc",
 		fmt.Sprintf("--rpc-listen-port=%d", port),
 		"--rpc-listen-all=false",
@@ -157,7 +158,16 @@ func (a *Aria2) ensureRunning() error {
 		"--continue=true",
 		"--allow-overwrite=false",
 		"--auto-file-renaming=false",
-	)
+	}
+	// 系统代理透传（Mihomo/Clash 等 Fake-IP 环境下 BT/DHT 的 UDP 不走代理管道，
+	// 显式传 --all-proxy 让 aria2 经代理解决 peer/tracker 连通性）
+	if a.proxyFn != nil {
+		if proxy := a.proxyFn(); proxy != "" {
+			args = append(args, fmt.Sprintf("--all-proxy=%s", proxy))
+			fmt.Printf("aria2-next 代理: %s\n", proxy)
+		}
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

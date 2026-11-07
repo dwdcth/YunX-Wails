@@ -23,6 +23,9 @@ type Hooks struct {
 	KvGet func(key string) (string, bool)
 	// Call 核心通用命令通道（读正式设置用，如 settings_list 的 downloadDirUri）。可空。
 	Call func(requestJSON string) (string, error)
+	// Proxy 返回代理 URL（如 http://127.0.0.1:7890）；空=不走代理。可空。
+	// 传给 aria2-next 的 --all-proxy（BT/DHT 在 Fake-IP 环境下需要显式代理）。
+	Proxy func() string
 }
 
 // Manager 普通下载管理器。
@@ -54,6 +57,7 @@ func Init(dataDir string, hooks Hooks) (*Manager, error) {
 	m := &Manager{dataDir: dataDir, db: db, hooks: hooks}
 	m.aria2 = NewAria2(db, dataDir, Aria2Hooks{KvGet: hooks.KvGet, DefaultDir: m.DefaultDir})
 	m.aria2.onExit = m.watchAria2Exit // 进程重启后重新应用限速
+	m.aria2.proxyFn = hooks.Proxy     // 系统代理探测（BT 连通性）
 	m.ftp = NewFTPEngine(db)
 	// FTP 引擎注入全局限速读取器（从正式设置拉，30s 缓存）
 	ftpLimitCache := struct {
