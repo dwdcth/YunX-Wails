@@ -322,6 +322,13 @@ object CloudGateway {
         SharePlatform.ILANZOU -> rg.ilanzouAccount.getAccount()?.let { a ->
             rg.ilanzouApi.getDownloadLink(a.appToken, a.uuid, file.fid, a.userId)
         } ?: throw IllegalStateException("取直链失败（未登录蓝奏云优享版）")
-        else -> throw UnsupportedOperationException("该平台的个人盘直链下载暂未接入（迅雷/百度走分享转存路径）")
+        SharePlatform.BAIDU ->
+            // locateDownload 收路径：百度列表的 fid 是 fs_id，路径存放在 fidToken
+            com.yunx.app.data.network.model.DownloadLink(
+                fid = file.fid, filename = file.fname,
+                downloadUrl = rg.baiduApi.locateDownload(file.fidToken, requireBaiduCookie()),
+                size = file.fsize,
+            )
+        else -> throw UnsupportedOperationException("该平台的个人盘直链下载暂未接入（仅剩迅雷：core 无对应 API）")
     }
 }
