@@ -452,6 +452,28 @@ func (a *Aria2) ChangeGlobalOption(opts map[string]string) error {
 	return err
 }
 
+// GetGlobalOption 读 aria2 全局选项（诊断/测试用：验证 bt-tracker 是否随启动参数生效）。
+func (a *Aria2) GetGlobalOption() (map[string]string, error) {
+	res, err := a.call("aria2.getGlobalOption")
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(res, &raw); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		} else {
+			b, _ := json.Marshal(v)
+			out[k] = string(b)
+		}
+	}
+	return out, nil
+}
+
 // Running 进程是否在运行（Manager 据此决定是否即时应用全局选项）。
 func (a *Aria2) Running() bool { return a.running }
 
@@ -466,7 +488,9 @@ type aria2Status struct {
 	ErrorCode       string `json:"errorCode"`
 	ErrorMessage    string `json:"errorMessage"`
 	Files           []struct {
-		Path string `json:"path"`
+		Path     string `json:"path"`
+		Length   string `json:"length"`
+		Selected string `json:"selected"` // BT select-file 后 "true"/"false"；HTTP 任务无此字段
 	} `json:"files"`
 }
 
@@ -538,15 +562,24 @@ func (a *Aria2) pollTask(t *Task) {
 
 	switch st.Status {
 	case "active":
+		// ★ BT 任务数据收齐后转做种，status 恒为 active 不翻 complete（aria2 行为）——
+		//   全量落盘即视为完成，顺手摘任务停做种（对齐迅雷：下完不做种）。
+		//   FinishTask 后任务出轮询列表，remove 引发的下轮 GID 报错不会波及本任务。
+		if size > 0 && done >= size {
+			_ = a.db.FinishTask(t.ID, StatusDone, size, done, 100, "")
+			a.fillPath(t, st)
+			_, _ = a.postRPC(url, secret, "aria2.remove", t.Gid)
+			return
+		}
 		_ = a.db.UpdatePoll(t.ID, StatusActive, size, done, speed, progress, "")
-		a.fillPath(t.ID, st)
+		a.fillPath(t, st)
 	case "waiting":
 		_ = a.db.UpdatePoll(t.ID, StatusPending, size, done, 0, progress, "")
 	case "paused":
 		_ = a.db.UpdatePoll(t.ID, StatusPaused, size, done, 0, progress, "")
 	case "complete":
 		_ = a.db.FinishTask(t.ID, StatusDone, size, done, 100, "")
-		a.fillPath(t.ID, st)
+		a.fillPath(t, st)
 	case "error":
 		msg := st.ErrorMessage
 		if msg == "" {
@@ -558,17 +591,35 @@ func (a *Aria2) pollTask(t *Task) {
 	}
 }
 
-// fillPath 用 files[0].path 回填 save_path 与 name（仅当有值时）。
-func (a *Aria2) fillPath(id int64, st aria2Status) {
-	if len(st.Files) == 0 || st.Files[0].Path == "" {
+// fillPath 用落盘路径回填 save_path 与 name。★ select-file 场景取第一个选中文件
+//（files[0] 可能是未选中小文件）；name 仅在任务还没名字时回填（提交时的显示名优先）。
+func (a *Aria2) fillPath(t *Task, st aria2Status) {
+	if len(st.Files) == 0 {
 		return
 	}
-	p := st.Files[0].Path
-	name := p
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 && i < len(p)-1 {
-		name = p[i+1:]
+	p := ""
+	for i := range st.Files {
+		if st.Files[i].Selected == "true" || st.Files[i].Selected == "" {
+			if st.Files[i].Path != "" {
+				p = st.Files[i].Path
+				break
+			}
+		}
 	}
-	_ = a.db.SetSavePath(id, p, name)
+	if p == "" { // 全 false / 全空路径：回落 files[0]
+		p = st.Files[0].Path
+	}
+	if p == "" {
+		return
+	}
+	name := ""
+	if t.Name == "" { // 已有名字（磁力确认后的真名/提交名）不覆盖
+		name = p
+		if i := strings.LastIndexAny(p, `/\`); i >= 0 && i < len(p)-1 {
+			name = p[i+1:]
+		}
+	}
+	_ = a.db.SetSavePath(t.ID, p, name)
 }
 
 // rpcAlive 探测 RPC 是否可达（区分「进程不在」与「GID 报错」）。

@@ -158,10 +158,12 @@ func (d *DB) UpdatePoll(id int64, status string, size, downloaded, speed int64, 
 	return err
 }
 
-// SetSavePath 补填落盘路径与文件名（aria2 complete 后 files[0].path）。
+// SetSavePath 补填落盘路径与文件名；name 传空表示不动 name
+//（磁力确认后的显示名优先，别被 files[0] 的小文件顶掉）。
 func (d *DB) SetSavePath(id int64, savePath, name string) error {
-	_, err := d.sql.Exec(`UPDATE normal_task SET save_path=?, name=?, updated_at=? WHERE id=?`,
-		savePath, name, time.Now().Unix(), id)
+	_, err := d.sql.Exec(`UPDATE normal_task SET save_path=?,
+		name=CASE WHEN ?='' THEN name ELSE ? END, updated_at=? WHERE id=?`,
+		savePath, name, name, time.Now().Unix(), id)
 	return err
 }
 
