@@ -68,6 +68,7 @@ func StartBrowserBridge(app *application.App, core *CoreService) *browserBridge 
 	mux.HandleFunc("/hook", b.handleHook)
 	mux.HandleFunc("/bili", b.handleVideoSubmit)  // B站视频静默提交
 	mux.HandleFunc("/video", b.handleVideoSubmit) // 通用视频静默提交
+	mux.HandleFunc("/log", b.handleFrontendLog)  // 前端错误/诊断回传（fire-and-forget）
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 	fmt.Printf("插件桥：监听 127.0.0.1:%d\n", ln.Addr().(*net.TCPAddr).Port)
@@ -240,4 +241,13 @@ func (s *CoreService) BridgeDecide(id string, action string, saveDir string) (st
 	}
 	ch <- bridgeDecision{Action: action, SaveDir: saveDir}
 	return `{"ok":true}`, nil
+}
+
+// handleFrontendLog 前端 window.onerror / unhandledrejection 回传（CORS 不拦 simple POST 发送）。
+func (b *browserBridge) handleFrontendLog(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<10))
+	if len(body) > 0 {
+		fmt.Println("FRONTEND-ERR:", string(body))
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
