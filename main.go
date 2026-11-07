@@ -64,6 +64,17 @@ func main() {
 			// BundledAssetFileServer：静态资源之外还伺服 /wails/runtime.js
 			// （bindings 用 -b 内置 runtime 时必需，AssetFileServerFS 不带会 404）
 			Handler: application.BundledAssetFileServer(assets),
+			// ★ index.html 禁缓存：WebKit 磁盘缓存会在应用升级后继续用旧 index.html，
+			// 请求已不存在的旧哈希 chunk → 404 → 页面半死（无导航栏/空白/无 JS 报错）。
+			// 哈希名资源内容寻址可长缓存；入口文档必须每次校验。
+			Middleware: func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+						w.Header().Set("Cache-Control", "no-store")
+					}
+					next.ServeHTTP(w, r)
+				})
+			},
 		},
 		// 应用退出钩子：优雅停 aria2-next 子进程与 FTP worker（幂等，run 结束路径双保险）
 		OnShutdown: normalDownloadShutdown,
