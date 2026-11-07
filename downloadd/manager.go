@@ -472,8 +472,9 @@ func (m *Manager) Resume(id int64) error {
 	}
 	if t.Gid != "" {
 		if err := m.aria2.Unpause(t.Gid); err != nil {
-			// GID 过期（应用重启后 aria2 会话重建，旧 GID 不保留）→ 摘旧 gid 重提
-			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "GID") {
+			// 只有 GID 真正过期（"is not found"）才重提；"cannot be unpaused" 等
+			// 其它含 GID 字样的错误不重提（重提=丢进度从零开始，暂停恢复场景绝不能走）
+			if strings.Contains(err.Error(), "is not found") {
 				return m.retryAria2(t)
 			}
 			if !tolerableAria2Err(err) {
