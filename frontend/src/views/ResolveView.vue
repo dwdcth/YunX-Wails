@@ -104,6 +104,7 @@ interface MagnetFile { index: number; path: string; length: number }
 interface MagnetInfo { resolveId: string; name: string; files: MagnetFile[]; totalLength: number; singleFile: boolean }
 
 const magnetOpen = ref(false)
+const magnetBg = ref(false) // 后台解析中（弹窗关闭但解析继续，badge 提示）
 const magnetPhase = ref<'resolving' | 'ready' | 'error'>('resolving')
 const magnetUrl = ref('')
 const magnetInfo = ref<MagnetInfo | null>(null)
@@ -122,6 +123,14 @@ function openMagnetDialog(url: string) {
   void resolveMagnet()
 }
 
+function cancelMagnet() {
+  magnetOpen.value = false
+  magnetBg.value = false
+  magnetInfo.value = null
+  magnetPhase.value = 'resolving'
+  magnetError.value = ''
+}
+
 async function resolveMagnet() {
   magnetPhase.value = 'resolving'
   magnetError.value = ''
@@ -136,6 +145,12 @@ async function resolveMagnet() {
     magnetSel.value = new Set(r.files.map((f: MagnetFile) => f.index))
     magnetName.value = r.name
     magnetPhase.value = 'ready'
+    if (magnetBg.value) {
+      // 后台解析完成：提示用户回来选择
+      flash('磁力元数据已获取（后台），点击磁力图标查看文件清单')
+      magnetOpen.value = true // 弹回来让用户选
+      magnetBg.value = false
+    }
   } catch (e) {
     magnetError.value = String(e)
     magnetPhase.value = 'error'
@@ -601,6 +616,10 @@ Events.On('clipboard:link', (data: unknown) => {
             <input type="file" accept=".torrent,.metalink,.meta4,.metalink3"
                    style="display: none" @change="pickLocalTorrent" />
           </label>
+          <span v-if="magnetBg" class="chip" style="align-self: flex-end; cursor: pointer; background: var(--primary-container); color: var(--on-primary-container)"
+              title="磁力元数据后台解析中，点击查看" @click="magnetOpen = true; magnetBg = false">
+              ⟳ 磁力解析中…
+            </span>
           <button class="btn" style="align-self: flex-end" :disabled="!link.trim() || loading"
                   @click="parse()">
             {{ loading ? '解析中…' : '解析' }}
@@ -835,7 +854,8 @@ Events.On('clipboard:link', (data: unknown) => {
       <div class="dlg" style="width: min(560px, 92vw); max-height: 80vh; overflow: auto">
         <div class="row" style="justify-content: space-between; margin-bottom: 6px">
           <h3 style="margin: 0">磁力下载</h3>
-          <button class="btn text small" @click="magnetOpen = false">关闭</button>
+          <button class="btn text small" @click="magnetBg = true; magnetOpen = false">后台解析</button>
+          <button class="btn text small" @click="cancelMagnet">关闭</button>
         </div>
 
         <div v-if="magnetPhase === 'resolving'" class="magnet-resolving">
