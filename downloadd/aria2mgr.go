@@ -46,6 +46,8 @@ type Aria2 struct {
 	cmdDone  chan struct{} // 监测协程 Wait 收尸后关闭（Shutdown 等它，绝不并发 Wait）
 	onExit   func()        // 进程退出时通知 Manager（重置 optsApplied）
 	proxyFn  func() string // 系统代理 URL（如 http://127.0.0.1:7890）；空=不走代理
+	onReady  func()        // 进程启动就绪后回调（Manager 用来即时应用 tracker 等全局选项）
+	trackerFn func() string // 返回 bt-tracker 列表（写入启动参数，磁力元数据下载从第一秒就有 tracker）
 	running  bool
 	stopped  bool // Shutdown 后不再自启
 	port     int
@@ -163,6 +165,13 @@ func (a *Aria2) ensureRunning() error {
 	//   （peer 是原始 TCP 连接不走 HTTP 代理，代理导致连接失败速度恒 0）。
 	//   HTTP 直链下载走系统路由（TUN 已处理）；需要代理时由 changeGlobalOption 按需设。
 	_ = a.proxyFn // 保留字段供未来按类型选择性代理
+	// ★ bt-tracker 直接写入启动参数（磁力元数据下载在首个 AddURI 就开始，
+	//   运行时 changeGlobalOption 可能晚一步——启动参数保证从第一秒就有 tracker）
+	if a.trackerFn != nil {
+		if tr := a.trackerFn(); tr != "" {
+			args = append(args, fmt.Sprintf("--bt-tracker=%s", tr))
+		}
+	}
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -200,6 +209,9 @@ func (a *Aria2) ensureRunning() error {
 	for time.Now().Before(deadline) {
 		if _, err := a.postRPC(rpcURL, a.secret, "aria2.getVersion"); err == nil {
 			a.pollOnce.Do(a.startPolling)
+			if a.onReady != nil {
+				go runCatchingGo(a.onReady) // ★ 进程启动即应用全局选项（异步不阻塞，不手动解锁避免双重 Unlock）
+			}
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)

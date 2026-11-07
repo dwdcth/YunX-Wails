@@ -58,6 +58,23 @@ func Init(dataDir string, hooks Hooks) (*Manager, error) {
 	m.aria2 = NewAria2(db, dataDir, Aria2Hooks{KvGet: hooks.KvGet, DefaultDir: m.DefaultDir})
 	m.aria2.onExit = m.watchAria2Exit // 进程重启后重新应用限速
 	m.aria2.proxyFn = hooks.Proxy     // 系统代理探测（BT 连通性）
+	m.aria2.onReady = m.applyOptionsOnce // ★ 进程启动即应用 tracker/限速（不等首个任务）
+	m.aria2.trackerFn = func() string {
+		if m.hooks.Call == nil {
+			return defaultTrackers // 测试/无核心场景直接默认
+		}
+		if raw, err := m.hooks.Call(`{"cmd":"settings_list"}`); err == nil {
+			var r struct {
+				Settings map[string]any `json:"settings"`
+			}
+			if json.Unmarshal([]byte(raw), &r) == nil {
+				if v, ok := r.Settings["btTrackers"].(string); ok && normalizeTrackerList(v) != "" {
+					return normalizeTrackerList(v)
+				}
+			}
+		}
+		return defaultTrackers // 设置为空时用默认
+	}
 	m.ftp = NewFTPEngine(db)
 	// FTP 引擎注入全局限速读取器（从正式设置拉，30s 缓存）
 	ftpLimitCache := struct {
