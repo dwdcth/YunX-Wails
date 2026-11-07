@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -185,4 +186,38 @@ func (s *CoreService) Aria2ApplyOptions() string {
 		return errorJSON(err.Error())
 	}
 	return `{"ok":true}`
+}
+
+// MagnetResolve 迅雷式磁力第一步：只取元数据（不开始下载），返回种子真名+文件清单供用户选择。
+func (s *CoreService) MagnetResolve(magnet string) string {
+	m, err := normalDLReady()
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	info, err := m.MagnetResolve(strings.TrimSpace(magnet))
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	b, _ := json.Marshal(struct {
+		OK bool `json:"ok"`
+		*downloadd.MagnetInfo
+	}{OK: true, MagnetInfo: info})
+	return string(b)
+}
+
+// MagnetSubmit 磁力第二步：用户选好文件/文件名后开始下载（select-file/out）。
+func (s *CoreService) MagnetSubmit(resolveId, saveDir string, selected []int, name string) string {
+	m, err := normalDLReady()
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	res, err := m.MagnetSubmit(resolveId, saveDir, selected, name)
+	if err != nil {
+		return errorJSON(err.Error())
+	}
+	b, _ := json.Marshal(struct {
+		OK bool `json:"ok"`
+		*downloadd.SubmitResult
+	}{OK: true, SubmitResult: res})
+	return string(b)
 }

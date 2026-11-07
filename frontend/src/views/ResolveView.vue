@@ -12,6 +12,7 @@ import {
   type GithubAsset, type LinkHistoryItem, type ShareDetail, type ShareFile,
 } from '../core'
 import AppIcon from '../components/AppIcon.vue'
+import { CoreService } from '../../bindings/yunxwailsdemo/index.js'
 import DirPickerModal from '../components/DirPickerModal.vue'
 import { Events } from '/wails/runtime.js'
 
@@ -63,6 +64,86 @@ async function submitNormal(source: string) {
     error.value = String(e)
   } finally {
     normalBusy.value = false
+  }
+}
+
+// ---- 磁力下载（迅雷式）：先取元数据 → 用户选文件/确认文件名 → 再开始 ----
+
+interface MagnetFile { index: number; path: string; length: number }
+interface MagnetInfo { resolveId: string; name: string; files: MagnetFile[]; totalLength: number; singleFile: boolean }
+
+const magnetOpen = ref(false)
+const magnetPhase = ref<'resolving' | 'ready' | 'error'>('resolving')
+const magnetUrl = ref('')
+const magnetInfo = ref<MagnetInfo | null>(null)
+const magnetError = ref('')
+const magnetSel = ref<Set<number>>(new Set())
+const magnetName = ref('') // 单文件可改（aria2 out）；多文件只读（aria2 改不了根目录名）
+const magnetSaveDir = ref('')
+const magnetBusy = ref(false)
+
+function openMagnetDialog(url: string) {
+  magnetUrl.value = url
+  magnetPhase.value = 'resolving'
+  magnetError.value = ''
+  magnetInfo.value = null
+  magnetOpen.value = true
+  void resolveMagnet()
+}
+
+async function resolveMagnet() {
+  magnetPhase.value = 'resolving'
+  magnetError.value = ''
+  try {
+    const r = JSON.parse(await CoreService.MagnetResolve(magnetUrl.value))
+    if (!r.ok) {
+      magnetError.value = r.error ?? '元数据获取失败'
+      magnetPhase.value = 'error'
+      return
+    }
+    magnetInfo.value = r
+    magnetSel.value = new Set(r.files.map((f: MagnetFile) => f.index))
+    magnetName.value = r.name
+    magnetPhase.value = 'ready'
+  } catch (e) {
+    magnetError.value = String(e)
+    magnetPhase.value = 'error'
+  }
+}
+
+const magnetSelTotal = computed(() =>
+  magnetInfo.value?.files.filter((f) => magnetSel.value.has(f.index)).reduce((a, f) => a + f.length, 0) ?? 0)
+
+function toggleMagnetFile(i: number) {
+  const next = new Set(magnetSel.value)
+  if (next.has(i)) next.delete(i)
+  else next.add(i)
+  magnetSel.value = next
+}
+
+async function confirmMagnet() {
+  if (!magnetInfo.value || magnetBusy.value) return
+  const selected = [...magnetSel.value].sort((a, b) => a - b)
+  if (selected.length === 0) { flash('请至少选择一个文件'); return }
+  magnetBusy.value = true
+  try {
+    const r = JSON.parse(await CoreService.MagnetSubmit(
+      magnetInfo.value.resolveId, magnetSaveDir.value.trim(), selected,
+      magnetInfo.value.singleFile ? magnetName.value.trim() : ''))
+    if (r.ok) {
+      flash(`「${r.name}」已加入下载（任务 #${r.taskId}），进度见下载页`)
+      normalNotice.value = r.name || magnetUrl.value
+      setTimeout(() => (normalNotice.value = ''), 30_000)
+      magnetOpen.value = false
+    } else {
+      magnetError.value = r.error ?? '提交失败'
+      magnetPhase.value = 'error'
+    }
+  } catch (e) {
+    magnetError.value = String(e)
+    magnetPhase.value = 'error'
+  } finally {
+    magnetBusy.value = false
   }
 }
 
@@ -344,6 +425,10 @@ async function parse(text?: string, pwdOverride?: string) {
       // 分享解析没接住（found=false）→ 普通链接兜底（不打架：只在解析失败分支出现）。
       // ftp/磁力/ed2k/bc1 与 .torrent/.metalink 后缀是明确普通链接 → 直接提交；
       // 纯 http(s) 直链 → 只给「直接下载」按钮，不自动提交。
+      if (/^magnet:/i.test(url)) {
+        openMagnetDialog(url) // 迅雷式：先解析元数据让用户选文件，不再直接入队
+        return
+      }
       if (isNormalDownloadLink(url)) {
         await submitNormal(url)
       } else if (/^https?:\/\//i.test(url)) {
@@ -699,7 +784,61 @@ Events.On('clipboard:link', (data: unknown) => {
         </div>
       </div>
     </div>
-  </div>
+  
+    <!-- 磁力下载对话框（迅雷式：元数据解析 → 选文件/改名 → 开始） -->
+    <div v-if="magnetOpen" class="mask" @click.self="magnetOpen = false">
+      <div class="dlg" style="width: min(560px, 92vw); max-height: 80vh; overflow: auto">
+        <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+          <h3 style="margin: 0">磁力下载</h3>
+          <button class="btn text small" @click="magnetOpen = false">关闭</button>
+        </div>
+
+        <div v-if="magnetPhase === 'resolving'" class="magnet-resolving">
+          <span class="spin"></span>
+          <p>正在获取磁力元数据（DHT 冷启动可能需要 1-3 分钟）…</p>
+          <p class="hint" style="word-break: break-all">{{ magnetUrl }}</p>
+        </div>
+
+        <div v-else-if="magnetPhase === 'error'">
+          <p class="banner error">{{ magnetError }}</p>
+          <div class="row" style="justify-content: flex-end">
+            <button class="btn text small" @click="magnetOpen = false">取消</button>
+            <button class="btn tonal small" @click="resolveMagnet">重试</button>
+          </div>
+        </div>
+
+        <template v-else-if="magnetInfo">
+          <div class="field" style="margin-bottom: 8px">
+            <label>保存文件名{{ magnetInfo.singleFile ? '' : '（种子目录名，多文件不可改）' }}</label>
+            <input v-if="magnetInfo.singleFile" v-model="magnetName" class="input" />
+            <input v-else :value="magnetName" class="input" disabled title="aria2 无法重命名种子的根目录" />
+          </div>
+          <div class="field" style="margin-bottom: 8px">
+            <label>保存目录（空 = 默认下载目录）</label>
+            <input v-model="magnetSaveDir" class="input" placeholder="~/Downloads/…" />
+          </div>
+          <p class="hint" style="margin: 0 0 6px">
+            文件清单（已选 {{ magnetSel.size }}/{{ magnetInfo.files.length }} · {{ fmtBytes(magnetSelTotal) }} / {{ fmtBytes(magnetInfo.totalLength) }}）
+            <a style="cursor: pointer" @click="magnetSel = new Set(magnetInfo.files.map(f => f.index))">全选</a> ·
+            <a style="cursor: pointer" @click="magnetSel = new Set()">全不选</a>
+          </p>
+          <div class="magnet-files">
+            <label v-for="f in magnetInfo.files" :key="f.index" class="magnet-file">
+              <input type="checkbox" :checked="magnetSel.has(f.index)" @change="toggleMagnetFile(f.index)" />
+              <span class="mfp" :title="f.path">{{ f.path }}</span>
+              <span class="mfs">{{ fmtBytes(f.length) }}</span>
+            </label>
+          </div>
+          <div class="row" style="justify-content: flex-end; margin-top: 10px">
+            <button class="btn text small" @click="magnetOpen = false">取消</button>
+            <button class="btn" :disabled="magnetBusy || magnetSel.size === 0" @click="confirmMagnet">
+              {{ magnetBusy ? '提交中…' : `开始下载（${magnetSel.size} 个文件）` }}
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+</div>
 </template>
 
 <style scoped>
@@ -742,4 +881,18 @@ Events.On('clipboard:link', (data: unknown) => {
 .hurl { font-size: 12px; color: var(--on-bg-variant); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .hmeta { font-size: 12px; color: var(--on-bg-variant); }
+/* 磁力对话框 */
+.magnet-resolving { text-align: center; padding: 24px 8px; }
+.magnet-resolving .spin { display: inline-block; width: 22px; height: 22px; border-radius: 50%;
+  border: 2.5px solid var(--outline-variant); border-top-color: var(--primary);
+  animation: mspin 0.9s linear infinite; margin-bottom: 10px; }
+@keyframes mspin { to { transform: rotate(360deg); } }
+.magnet-files { max-height: 260px; overflow: auto; border: 1px solid var(--outline-variant);
+  border-radius: var(--radius); }
+.magnet-file { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid var(--outline-variant); font-size: 13px; cursor: pointer; }
+.magnet-file:last-child { border-bottom: none; }
+.magnet-file:hover { background: var(--surface-container); }
+.magnet-file .mfp { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.magnet-file .mfs { color: var(--on-bg-variant); font-size: 12px; flex: none; }
 </style>

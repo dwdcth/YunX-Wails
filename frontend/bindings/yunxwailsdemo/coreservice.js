@@ -137,6 +137,27 @@ export function LegacyImportStatus() {
 }
 
 /**
+ * MagnetResolve 迅雷式磁力第一步：只取元数据（不开始下载），返回种子真名+文件清单供用户选择。
+ * @param {string} magnet
+ * @returns {$CancellablePromise<string>}
+ */
+export function MagnetResolve(magnet) {
+    return $Call.ByID(3294046988, magnet);
+}
+
+/**
+ * MagnetSubmit 磁力第二步：用户选好文件/文件名后开始下载（select-file/out）。
+ * @param {string} resolveId
+ * @param {string} saveDir
+ * @param {number[]} selected
+ * @param {string} name
+ * @returns {$CancellablePromise<string>}
+ */
+export function MagnetSubmit(resolveId, saveDir, selected, name) {
+    return $Call.ByID(1055705176, resolveId, saveDir, selected, name);
+}
+
+/**
  * NormalDownloadList 全量任务列表（含 ftp 无 gid 任务），created_at 倒序。
  * 返回 {ok, tasks:[{id,engine,gid,url,name,saveDir,savePath,size,downloaded,progress,speed,status,err,createdAt,updatedAt}]}。
  * @returns {$CancellablePromise<string>}
