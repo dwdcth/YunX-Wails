@@ -66,11 +66,16 @@ const previewMedia = ref<VideoMedia | null>(null)
 
 async function openPreview(m: VideoMedia) {
   if (!m.url) return
-  previewMedia.value = m
-  // B 站等 CDN 有 Referer 防盗链，<video> 直连会黑屏：走 Go 本地代理（用视频页 origin 作 Referer）
+  let referer = ''
+  try { referer = new URL(url.value).origin } catch { /* 无效页址则不带 */ }
+  // 首选 ffplay 原生窗口（B 站 Referer 防盗链下最稳，独立窗口自带关闭）
   try {
-    let referer = ''
-    try { referer = new URL(url.value).origin } catch { /* 无效页址则不带 */ }
+    const play = JSON.parse(await CoreService.PreviewPlayURL(m.url, referer, m.label || '视频预览'))
+    if (play.ok) { flash('已用 ffplay 打开预览（独立窗口）'); return }
+  } catch { /* 回退 */ }
+  previewMedia.value = m
+  // 回退：Go 本地代理流（用视频页 origin 作 Referer）+ 页内 <video>
+  try {
     const r = JSON.parse(await CoreService.PreviewProxyURL(m.url, referer))
     if (r.ok && r.url) (m as { proxyUrl?: string }).proxyUrl = r.url
   } catch { /* 代理不可用回退直连 */ }

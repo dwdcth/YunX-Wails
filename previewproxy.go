@@ -10,6 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	"yunxwailsdemo/hostenv"
 	"net"
 	"net/http"
 	"strings"
@@ -166,4 +171,112 @@ func (s *CoreService) PreviewProxyURL(url, referer string) string {
 	return marshalMust(map[string]any{
 		"ok": true, "url": previewProxyInst.registerTarget(url, headers), "proxied": true,
 	})
+}
+
+// ---- ffplay 外部播放器预览（对齐原版 FfplayManager.buildCommand；独立窗口、自带关闭）----
+
+// locateFfplay 找 ffplay：ffmpeg 同目录 > PATH。ffmpeg 路径沿用宿主探测（hostenv.FfmpegAuto）。
+func locateFfplay() string {
+	if ff := hostenv.FfmpegAuto(); ff != "" {
+		if p := filepath.Join(filepath.Dir(ff), "ffplay"); fileExistsGo(p) {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("ffplay"); err == nil {
+		return p
+	}
+	return ""
+}
+
+func fileExistsGo(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+// ffplayArgs 组装命令行（对齐 FfplayManager.buildCommand：UA/Referer/Cookie 独立旗标，
+// 其余头走 -headers，\r\n 分隔；ProcessBuilder 等价 = exec 不经 shell）。
+func ffplayArgs(exe, url, title string, headers map[string]string) []string {
+	get := func(key string) string {
+		for k, v := range headers {
+			if strings.EqualFold(k, key) {
+				return v
+			}
+		}
+		return ""
+	}
+	args := []string{exe, "-hide_banner", "-loglevel", "info", "-stats", "-autoexit",
+		"-window_title", title}
+	if ua := get("User-Agent"); ua != "" {
+		args = append(args, "-user_agent", ua)
+	}
+	if r := get("Referer"); r != "" {
+		args = append(args, "-referer", r)
+	}
+	if c := get("Cookie"); c != "" {
+		args = append(args, "-cookies", c)
+	}
+	var rest []string
+	for k, v := range headers {
+		if strings.EqualFold(k, "User-Agent") || strings.EqualFold(k, "Referer") ||
+			strings.EqualFold(k, "Cookie") || strings.EqualFold(k, "Range") {
+			continue
+		}
+		rest = append(rest, k+": "+v)
+	}
+	if len(rest) > 0 {
+		args = append(args, "-headers", strings.Join(rest, "\r\n"))
+	}
+	return append(args, url)
+}
+
+// CloudPreviewPlay 云盘文件用 ffplay 在线预览（原生窗口，自带关闭/-autoexit 播完自退）。
+// 找不到 ffplay 返回 ok:false（前端回退页内代理播放）。
+func (s *CoreService) CloudPreviewPlay(platform, fid, fname string, fsize int64, fidToken string) string {
+	exe := locateFfplay()
+	if exe == "" {
+		return marshalMust(map[string]any{"ok": false, "error": "未找到 ffplay"})
+	}
+	req, _ := json.Marshal(map[string]any{
+		"cmd": "cloud_link", "platform": platform, "fid": fid, "fname": fname,
+		"fsize": fsize, "fidToken": fidToken,
+	})
+	raw, err := s.coreCall(string(req))
+	if err != nil {
+		return errorJSON("取直链失败: " + err.Error())
+	}
+	var r struct {
+		OK      bool              `json:"ok"`
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers"`
+	}
+	if json.Unmarshal([]byte(raw), &r) != nil || !r.OK || r.URL == "" {
+		return errorJSON("取直链失败: " + raw)
+	}
+	args := ffplayArgs(exe, r.URL, fname, r.Headers)
+	cmd := exec.Command(args[0], args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return errorJSON("启动 ffplay 失败: " + err.Error())
+	}
+	go func() { _ = cmd.Wait() }() // 回收，不阻塞
+	fmt.Println("预览：ffplay 已启动 pid=", cmd.Process.Pid, "file=", fname)
+	return marshalMust(map[string]any{"ok": true, "mode": "ffplay"})
+}
+
+// PreviewPlayURL 视频解析直链用 ffplay 播（B 站等 Referer 防盗链平台）。
+func (s *CoreService) PreviewPlayURL(url, referer, title string) string {
+	exe := locateFfplay()
+	if exe == "" {
+		return marshalMust(map[string]any{"ok": false, "error": "未找到 ffplay"})
+	}
+	headers := map[string]string{}
+	if referer != "" {
+		headers["Referer"] = referer
+	}
+	args := ffplayArgs(exe, url, title, headers)
+	cmd := exec.Command(args[0], args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return errorJSON("启动 ffplay 失败: " + err.Error())
+	}
+	go func() { _ = cmd.Wait() }()
+	return marshalMust(map[string]any{"ok": true, "mode": "ffplay"})
 }

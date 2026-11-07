@@ -196,6 +196,12 @@ async function doPreview(f: ShareFile) {
   previewBusy.value = true
   error.value = ''
   try {
+    // 首选 ffplay 原生窗口（自带关闭/进度/音量，支持需鉴权头的平台）；没装才回退页内代理播放
+    try {
+      const play = JSON.parse(await CoreService.CloudPreviewPlay(
+        browsing.value, f.fid, f.fname, f.fsize ?? 0, f.fidToken ?? ''))
+      if (play.ok) { flash(`已用 ffplay 打开「${f.fname}」（独立窗口）`); return }
+    } catch { /* 继续回退 */ }
     const r = JSON.parse(await CoreService.CloudPreviewURL(
       browsing.value, f.fid, f.fname, f.fsize ?? 0, f.fidToken ?? ''))
     if (r.ok && r.url) {

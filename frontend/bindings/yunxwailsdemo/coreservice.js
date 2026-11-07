@@ -78,6 +78,20 @@ export function Call(requestJSON) {
 }
 
 /**
+ * CloudPreviewPlay 云盘文件用 ffplay 在线预览（原生窗口，自带关闭/-autoexit 播完自退）。
+ * 找不到 ffplay 返回 ok:false（前端回退页内代理播放）。
+ * @param {string} platform
+ * @param {string} fid
+ * @param {string} fname
+ * @param {number} fsize
+ * @param {string} fidToken
+ * @returns {$CancellablePromise<string>}
+ */
+export function CloudPreviewPlay(platform, fid, fname, fsize, fidToken) {
+    return $Call.ByID(3671807787, platform, fid, fname, fsize, fidToken);
+}
+
+/**
  * CloudPreviewURL 云盘文件预览代理地址：cloud_link 取直链+请求头 → 登记到代理 → 返回可播 URL。
  * @param {string} platform
  * @param {string} fid
@@ -235,6 +249,17 @@ export function ParseShare(text) {
  */
 export function Ping() {
     return $Call.ByID(2464438806);
+}
+
+/**
+ * PreviewPlayURL 视频解析直链用 ffplay 播（B 站等 Referer 防盗链平台）。
+ * @param {string} url
+ * @param {string} referer
+ * @param {string} title
+ * @returns {$CancellablePromise<string>}
+ */
+export function PreviewPlayURL(url, referer, title) {
+    return $Call.ByID(1282245333, url, referer, title);
 }
 
 /**
