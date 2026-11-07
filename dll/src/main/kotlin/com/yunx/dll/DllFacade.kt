@@ -968,6 +968,26 @@ object DllFacade {
                         .put("headers", h)
                 }
 
+                "cloud_stream_start" -> {
+                    // 云盘直链 → 核心本地流中继（Java TLS 拉 CDN 流，本地纯 HTTP 输出）。
+                    // 供 ffplay/<video> 播放：夸克 CDN 做 TLS 指纹过滤，外部播放器直连必 403。
+                    val plat = platformOf(req.getString("platform"))
+                        ?: return error("未知平台").toString()
+                    val file = ShareFile(
+                        fid = req.getString("fid"),
+                        fname = req.optString("fname"),
+                        fsize = req.optLong("fsize", -1L), isdir = false,
+                        pdirFid = "", fidToken = req.optString("fidToken"),
+                    )
+                    val link = runBlocking { CloudGateway.downloadLink(plat, file) }
+                        ?: return error("取直链失败（账号可能未登录或链接已过期）").toString()
+                    val cred = runBlocking { ResolveGateway.credentialFor(plat) }
+                    val finalUrl = ResolveGateway.fastestUrl(plat, link.downloadUrl, cred)
+                    val headers = ResolveGateway.downloadHeaders(plat, cred, link)
+                    val relayUrl = CloudStreamRelay.start(finalUrl, headers)
+                    resp.put("url", relayUrl).put("filename", link.filename).put("size", link.size)
+                }
+
                 "share_transfer" -> {
                     val plat = ResolveGateway.platform
                         ?: return error("尚未解析任何分享").toString()

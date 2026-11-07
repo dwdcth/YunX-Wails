@@ -236,8 +236,10 @@ func (s *CoreService) CloudPreviewPlay(platform, fid, fname string, fsize int64,
 	if exe == "" {
 		return marshalMust(map[string]any{"ok": false, "error": "未找到 ffplay"})
 	}
+	// 走核心本地流中继：夸克等 CDN 做 TLS 指纹过滤（curl/ffmpeg/Go 全 403），
+	// 只有核心的 Java TLS 栈能过——中继本地纯 HTTP 输出，ffplay 直接播，无需带请求头。
 	req, _ := json.Marshal(map[string]any{
-		"cmd": "cloud_link", "platform": platform, "fid": fid, "fname": fname,
+		"cmd": "cloud_stream_start", "platform": platform, "fid": fid, "fname": fname,
 		"fsize": fsize, "fidToken": fidToken,
 	})
 	raw, err := s.coreCall(string(req))
@@ -245,21 +247,20 @@ func (s *CoreService) CloudPreviewPlay(platform, fid, fname string, fsize int64,
 		return errorJSON("取直链失败: " + err.Error())
 	}
 	var r struct {
-		OK      bool              `json:"ok"`
-		URL     string            `json:"url"`
-		Headers map[string]string `json:"headers"`
+		OK  bool   `json:"ok"`
+		URL string `json:"url"`
 	}
 	if json.Unmarshal([]byte(raw), &r) != nil || !r.OK || r.URL == "" {
 		return errorJSON("取直链失败: " + raw)
 	}
-	args := ffplayArgs(exe, r.URL, fname, r.Headers)
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.Command(exe, "-hide_banner", "-loglevel", "info", "-stats", "-autoexit",
+		"-window_title", fname, r.URL)
 	if err := cmd.Start(); err != nil {
 		return errorJSON("启动 ffplay 失败: " + err.Error())
 	}
 	go func() { _ = cmd.Wait() }() // 回收，不阻塞
-	fmt.Println("预览：ffplay 已启动 pid=", cmd.Process.Pid, "file=", fname)
-	return marshalMust(map[string]any{"ok": true, "mode": "ffplay"})
+	fmt.Println("预览：ffplay 已启动 pid=", cmd.Process.Pid, "file=", fname, "via relay")
+	return marshalMust(map[string]any{"ok": true, "mode": "ffplay-relay"})
 }
 
 // PreviewPlayURL 视频解析直链用 ffplay 播（B 站等 Referer 防盗链平台）。
