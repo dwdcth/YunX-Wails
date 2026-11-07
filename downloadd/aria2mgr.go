@@ -569,3 +569,21 @@ func runCatchingGo(f func()) {
 	defer func() { _ = recover() }()
 	f()
 }
+
+// findByInfoHash 在 aria2 全部任务中按 info-hash 查找 GID（磁力去重用）。
+func (a *Aria2) findByInfoHash(hash string) string {
+	if hash == "" { return "" }
+	for _, method := range []string{"tellActive", "tellWaiting", "tellStopped"} {
+		res, err := a.call("aria2."+method)
+		if err != nil { continue }
+		var tasks []struct {
+			GID      string `json:"gid"`
+			InfoHash string `json:"infoHash"`
+		}
+		if json.Unmarshal(res, &tasks) != nil { continue }
+		for _, t := range tasks {
+			if strings.EqualFold(t.InfoHash, hash) { return t.GID }
+		}
+	}
+	return ""
+}

@@ -80,7 +80,20 @@ func (m *Manager) MagnetResolve(magnet string) (*MagnetInfo, error) {
 		"auto-file-renaming": false, "allow-overwrite": true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("提交元数据下载失败: %w", err)
+		// 同 info-hash 任务已在（上次会话残留）：找到并移除后重试
+		if strings.Contains(err.Error(), "already being downloaded") {
+			if g := m.aria2.findByInfoHash(infoHashOf(magnet)); g != "" {
+				_ = m.aria2.Remove(g)
+				time.Sleep(500 * time.Millisecond)
+				gid, err = m.aria2.AddURI([]string{magnet}, map[string]any{
+					"dir": metaDir, "follow-torrent": false,
+					"auto-file-renaming": false, "allow-overwrite": true,
+				})
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("提交元数据下载失败: %w", err)
+		}
 	}
 	deadline := time.Now().Add(magnetResolveTimeout)
 	var metaPath string
@@ -179,4 +192,15 @@ func (m *Manager) MagnetSubmit(resolveID, saveDir string, selected []int, newNam
 		return nil, err
 	}
 	return &SubmitResult{TaskID: t.ID, TaskIDs: []int64{t.ID}, Engine: EngineAria2, Name: display}, nil
+}
+
+// infoHashOf 从磁力链接提取 info-hash（xt=urn:btih: 后面的十六进制串）
+func infoHashOf(magnet string) string {
+	lower := strings.ToLower(magnet)
+	idx := strings.Index(lower, "urn:btih:")
+	if idx < 0 { return "" }
+	rest := magnet[idx+9:]
+	end := strings.IndexAny(rest, "&")
+	if end > 0 { rest = rest[:end] }
+	return strings.TrimSpace(rest)
 }
