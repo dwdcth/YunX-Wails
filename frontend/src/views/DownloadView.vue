@@ -5,7 +5,10 @@
 // 磁力/BT/ed2k/Metalink/HTTP → aria2-next，FTP → Go 内置引擎）→ 两库合并一张列表，按来源路由行内操作。
 // 扩展：行复选多选批量操作 / 全局批量栏（全部暂停/开始/删除，同时作用两个引擎）/ 按目录分组 /
 // 行内 ⋯ 菜单（复制链接/重新下载/打开文件）/ ffmpeg 合轨进度（download_list stats.mergePercent 橙色条）/
-// 文件夹批量任务（share_folder_download 的 batch_list 轮询）/ 下载调试弹窗（仅云盘任务；对齐原版 DownloadDebugScreen）。
+// 文件夹批量任务（share_folder_download 的 batch_list 轮询）/ 下载调试弹窗（仅云盘任务；对齐原版 DownloadDebugScreen）/
+// 速度详情弹窗（会话内 800ms 速度采样 → 手写 SVG 双轴曲线：速度折线+面积 / 已下载阶梯线）。
+// 行副行速度口径对齐迅雷：下载中=实时速度、排队/暂停=状态文案（不显示 0 速度）、已完成=平均速度
+// （云盘 avgSpeed、普通任务 downloaded÷任务耗时）、失败不显示。
 // 列表工具栏（迅雷式）：状态页签（全部/下载中/失败/完成，带计数）+ 文件名搜索 + 排序（时间/文件名/大小·升降序），
 // 管线顺序 = 页签过滤 → 搜索 → 排序 → 分组（组内按当前排序，组间按组内最新任务时间倒序）。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
@@ -70,6 +73,8 @@ async function refresh() {
   } catch (e) {
     normalListError.value = String(e)
   }
+  // 两库列表都到位后做本轮速度采样（会话内曲线数据；Map O(1) 追加）
+  sampleSpeeds()
   try {
     batches.value = await batchList()
   } catch { /* 批量接口失败不影响任务列表展示 */ }
@@ -107,6 +112,8 @@ interface MergedRow {
   engine: string // 普通任务引擎标签：aria2-next / FTP
   error: string
   url: string // 普通任务原始链接（复制链接用；磁力/种子即其本体）
+  createdAt: number // Unix 秒（云盘 = download_list createdAt ?? 0；普通 = createdAt）——完成态均速/用时口径用
+  updatedAt: number // Unix 秒（仅普通任务有 updatedAt；云盘恒 0）——普通任务完成态均速 = downloaded ÷ (updatedAt-createdAt)
   sortTime: number // 排序时间戳（Unix 秒：云盘 = download_list createdAt；普通 = createdAt；缺失回退 0，
   // 由后端 createTime 倒序 + 稳定排序保住云盘任务内部「最新在前」的相对顺序）
 }
@@ -117,6 +124,7 @@ function cloudRow(t: DownloadTask): MergedRow {
     statusCode: t.status, statusText: t.statusText, total: t.total, downloaded: t.downloaded,
     speed: t.speed, avgSpeed: t.avgSpeed, remainMillis: t.remainMillis,
     savePath: t.savePath ?? '', platform: t.platform ?? '', engine: '', error: t.error ?? '', url: '',
+    createdAt: t.createdAt ?? 0, updatedAt: 0,
     sortTime: t.createdAt ?? 0,
   }
 }
@@ -130,7 +138,8 @@ function normalRow(t: NormalTask): MergedRow {
     statusCode: normalStatusCode(t.status), statusText: NORMAL_STATUS_TEXT[t.status] ?? t.status,
     total: t.size, downloaded: t.downloaded, speed: t.speed, avgSpeed: 0, remainMillis: remain,
     savePath: t.savePath ?? '', platform: '', engine: t.engine === 'ftp' ? 'FTP' : 'aria2-next',
-    error: t.err ?? '', url: t.url, sortTime: t.createdAt,
+    error: t.err ?? '', url: t.url, createdAt: t.createdAt, updatedAt: t.updatedAt,
+    sortTime: t.createdAt,
   }
 }
 
@@ -139,6 +148,33 @@ const rows = computed<MergedRow[]>(() => [
   ...tasks.value.map(cloudRow),
   ...normalTasks.value.map(normalRow),
 ])
+
+// ---- 会话内速度采样（速度详情弹窗的曲线数据源）----
+// 每次轮询 tick（800ms）对「下载中」页签口径的任务（状态 0/1/2，两引擎统一按 MergedRow key）各追一个样本；
+// 每任务上限 SPEED_SAMPLE_CAP 点（800ms×1200 ≈ 16 分钟），超出丢最旧；完成/失败停止采样但保留已采数据（详情仍可看）。
+// speedHistory 不入响应式（Map 追加 O(1)，不拖累轮询），弹窗刷新靠 speedTick 版本号驱动。
+
+interface SpeedSample { t: number; speed: number; downloaded: number }
+
+const SPEED_SAMPLE_CAP = 1200
+const speedHistory = new Map<string, SpeedSample[]>()
+const speedTick = ref(0) // 每轮采样 +1：弹窗打开期间曲线随轮询刷新（未打开时 computed 惰性、零开销）
+
+function sampleSpeeds() {
+  const now = Date.now()
+  for (const row of rows.value) {
+    if (row.statusCode === 3 || row.statusCode === 4) continue // 完成/失败：停止采样，保留历史
+    const sample: SpeedSample = { t: now, speed: row.speed, downloaded: row.downloaded }
+    const list = speedHistory.get(row.key)
+    if (list) list.push(sample)
+    else speedHistory.set(row.key, [sample])
+  }
+  // 超上限丢最旧（稳态下每 tick 至多丢 1 点，摊还 O(1)）
+  for (const list of speedHistory.values()) {
+    if (list.length > SPEED_SAMPLE_CAP) list.splice(0, list.length - SPEED_SAMPLE_CAP)
+  }
+  speedTick.value++
+}
 
 // ---- 列表工具栏（迅雷式多页签）：状态页签 → 文件名搜索 → 排序，依次过滤后进分组 ----
 
@@ -430,6 +466,24 @@ function statusClass(s: number): string {
   return s === 3 ? 'ok' : s === 4 ? 'err' : s === 1 ? 'run' : ''
 }
 
+/** 任务平均速度（B/s）：云盘 = 引擎 avgSpeed（全程口径）；普通任务 = downloaded ÷ max(1, updatedAt-createdAt)（Unix 秒差） */
+function avgSpeedOf(row: MergedRow): number {
+  if (row.cloud) return row.avgSpeed
+  return row.downloaded / Math.max(1, row.updatedAt - row.createdAt)
+}
+
+/** 行副行速度口径（对齐迅雷）：下载中 = 实时速度；排队/暂停 = 状态文案（不显示 0 速度）；
+ *  已完成 = 平均速度（云盘 avgSpeed / 普通任务前端按 downloaded÷任务耗时 计）；失败 = 不显示 */
+function rowSpeedText(row: MergedRow): string {
+  if (row.statusCode === 1) return fmtSpeed(row.speed)
+  if (row.statusCode === 0 || row.statusCode === 2) return row.statusText
+  if (row.statusCode === 3) {
+    const avg = avgSpeedOf(row)
+    return avg > 0 ? `均速 ${fmtSpeed(avg)}` : ''
+  }
+  return ''
+}
+
 /** 合轨进度挂到哪个任务上展示：优先下载中的任务，退而求任务列表第一个 */
 const mergingTaskId = computed(() => {
   if (merging.value <= 0) return 0
@@ -706,10 +760,145 @@ async function preemptChunk(c: DebugChunk) {
   }
 }
 
+// ---- 速度详情弹窗（会话内采样 → 手写 SVG 双轴曲线：速度折线+面积 / 已下载阶梯线；不引图表库）----
+
+const detailKey = ref('')
+let detailFallback: MergedRow | null = null // 打开瞬间的行快照：任务被删后弹窗仍能展示最后已知数据
+
+function openDetail(row: MergedRow) {
+  menuFor.value = ''
+  detailFallback = row
+  detailKey.value = row.key
+}
+
+function closeDetail() {
+  detailKey.value = ''
+}
+
+/** Esc 关闭速度详情弹窗（挂在 document 上，随组件卸载移除） */
+function onDetailKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && detailKey.value) closeDetail()
+}
+
+/** 弹窗当前行：优先实时行（指标随轮询更新），任务被删则回退到打开时的快照 */
+const detailRow = computed<MergedRow | null>(() => {
+  if (!detailKey.value) return null
+  return rows.value.find((r) => r.key === detailKey.value) ?? detailFallback
+})
+
+/** 弹窗当前样本序列（speedTick 依赖：每轮采样后失效重算；弹窗关闭时 computed 惰性不求值） */
+const detailSamples = computed<SpeedSample[]>(() => {
+  if (speedTick.value < 0) return [] // 不可达分支：仅建立对采样版本号的响应式依赖
+  const row = detailRow.value
+  return row ? speedHistory.get(row.key) ?? [] : []
+})
+
+/** 峰值速度（样本 max）+ 样本首尾时间差 + 样本数 */
+const detailStats = computed(() => {
+  const s = detailSamples.value
+  let peak = 0
+  let spanMs = 0
+  if (s.length > 0) {
+    for (const p of s) if (p.speed > peak) peak = p.speed
+    if (s.length >= 2) spanMs = s[s.length - 1].t - s[0].t
+  }
+  return { peak, spanMs, count: s.length }
+})
+
+/** 用时：样本首尾时间差 与 任务自建耗时（updatedAt-createdAt，仅普通任务两字段齐全）取大者（会话内口径） */
+const detailDurationMs = computed(() => {
+  const row = detailRow.value
+  if (!row) return 0
+  let ms = detailStats.value.spanMs
+  if (!row.cloud && row.createdAt > 0 && row.updatedAt > row.createdAt) {
+    ms = Math.max(ms, (row.updatedAt - row.createdAt) * 1000)
+  }
+  return ms
+})
+
+// 曲线图几何常量：viewBox 固定 640×200，宽度随弹窗自适应缩放
+const CHART_W = 640
+const CHART_H = 200
+const CHART_PAD = { l: 60, r: 56, t: 12, b: 22 }
+
+/** 速度轴（左轴）上限：1/2/5×10ⁿ 里取第一个 ≥ 峰值的好看档位（如 2 MB/s、5 MB/s） */
+function niceCeil(v: number): number {
+  if (!isFinite(v) || v <= 0) return 1
+  const base = 10 ** Math.floor(Math.log10(v))
+  for (const m of [1, 2, 5, 10]) {
+    if (m * base >= v - base * 1e-9) return m * base
+  }
+  return 10 * base
+}
+
+/** 刻度速度文案（fmtBytes 对 <1 的值会掉单位，这里兜底小数展示） */
+function fmtTickSpeed(v: number): string {
+  return v < 1 ? `${v.toFixed(2)} B/s` : fmtSpeed(v)
+}
+
+function fmtClock(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/** 曲线图数据：速度折线+半透明面积 / 已下载阶梯线（右轴归一化到总大小）/ 网格与刻度；无样本返回 null */
+const detailChart = computed(() => {
+  const row = detailRow.value
+  const s = detailSamples.value
+  if (!row || s.length === 0) return null
+  const l = CHART_PAD.l
+  const r = CHART_W - CHART_PAD.r
+  const t = CHART_PAD.t
+  const b = CHART_H - CHART_PAD.b
+  const pw = r - l
+  const ph = b - t
+  let peak = 0
+  for (const p of s) if (p.speed > peak) peak = p.speed
+  const yMax = niceCeil(peak)
+  const t0 = s[0].t
+  const t1 = s[s.length - 1].t
+  const span = Math.max(1, t1 - t0)
+  const x = (ts: number) => l + ((ts - t0) / span) * pw
+  const ySpeed = (v: number) => b - (Math.min(v, yMax) / yMax) * ph
+  const yDown = (v: number) => (row.total > 0 ? b - (Math.min(v, row.total) / row.total) * ph : b)
+
+  // 速度折线 + 半透明面积（首尾落到底边闭合）
+  const speedPathD = `M${s.map((p) => `${x(p.t).toFixed(1)},${ySpeed(p.speed).toFixed(1)}`).join(' L')}`
+  const areaPathD = `${speedPathD} L${x(t1).toFixed(1)},${b.toFixed(1)} L${x(t0).toFixed(1)},${b.toFixed(1)} Z`
+
+  // 已下载量阶梯线（step-after：上一档位保持到下一时刻再跳变；总大小未知则不画）
+  let dlPathD = ''
+  if (row.total > 0) {
+    const segs: string[] = []
+    s.forEach((p, i) => {
+      const px = x(p.t).toFixed(1)
+      const py = yDown(p.downloaded).toFixed(1)
+      if (i === 0) segs.push(`M${px},${py}`)
+      else segs.push(`L${px},${yDown(s[i - 1].downloaded).toFixed(1)}`, `L${px},${py}`)
+    })
+    dlPathD = segs.join(' ')
+  }
+
+  // 横向网格 4 条（25/50/75/100% 高度）：左侧速度刻度 + 右侧下载量百分比刻度（右轴共用同一套网格）
+  const grid = [0.25, 0.5, 0.75, 1].map((f) => ({
+    y: b - f * ph,
+    speed: fmtTickSpeed(yMax * f),
+    pct: `${Math.round(f * 100)}%`,
+  }))
+  // X 轴刻度：首/中/尾三个时间点（仅 1 个样本时只画首点，避免三条同文案叠在一起）
+  const xTicks = t1 === t0
+    ? [{ x: l, label: fmtClock(t0) }]
+    : [0, 0.5, 1].map((f) => ({ x: l + f * pw, label: fmtClock(t0 + f * (t1 - t0)) }))
+
+  return { viewBox: `0 0 ${CHART_W} ${CHART_H}`, l, r, b, speedPathD, areaPathD, dlPathD, grid, xTicks }
+})
+
 onMounted(() => {
   refresh()
   timer = window.setInterval(refresh, 800)
   document.addEventListener('click', closeMenu)
+  document.addEventListener('keydown', onDetailKeydown)
   loadShutdownSetting()
   shutdownCheckTimer = window.setInterval(checkShutdown, 5000)
 })
@@ -719,6 +908,8 @@ onUnmounted(() => {
   stopCountdownTimer()
   stopDebugPoll()
   document.removeEventListener('click', closeMenu)
+  document.removeEventListener('keydown', onDetailKeydown)
+  speedHistory.clear() // 会话内采样随组件卸载清空
 })
 </script>
 
@@ -866,7 +1057,7 @@ onUnmounted(() => {
             </div>
             <div style="font-size: 12px; color: var(--on-bg-variant)">
               {{ fmtBytes(row.downloaded) }}<span v-if="row.total > 0"> / {{ fmtBytes(row.total) }}</span>
-              · {{ row.statusCode === 1 ? fmtSpeed(row.speed) : row.cloud ? `均速 ${fmtSpeed(row.avgSpeed)}` : fmtSpeed(row.speed) }}
+              <span v-if="rowSpeedText(row)"> · {{ rowSpeedText(row) }}</span>
               <span v-if="row.statusCode === 1 && row.remainMillis > 0"> · 剩余 {{ fmtRemain(row.remainMillis) }}</span>
               <span v-if="row.cloud && row.platform"> · {{ row.platform }}</span>
             </div>
@@ -883,6 +1074,7 @@ onUnmounted(() => {
             <span class="rowmenu-wrap">
               <button class="btn text small" title="更多操作" @click.stop="toggleMenu(row.key)">⋯</button>
               <div v-if="menuFor === row.key" class="rowmenu">
+                <button class="menuitem" @click="openDetail(row)">速度详情</button>
                 <button class="menuitem" @click="copyLink(row)">复制链接</button>
                 <button v-if="row.cloud && row.statusCode === 4" class="menuitem" @click="redownload(row)">重新下载</button>
                 <button v-if="row.cloud && downloadDebugOn" class="menuitem" @click="openDebug(row)">调试信息</button>
@@ -1029,6 +1221,61 @@ onUnmounted(() => {
         </template>
       </div>
     </div>
+
+    <!-- 速度详情弹窗（会话内采样：左轴速度折线+面积 / 右轴已下载阶梯线；纯手写 SVG，不引图表库） -->
+    <div v-if="detailKey" class="mask" @click.self="closeDetail">
+      <div class="dlg speeddlg">
+        <div class="row" style="justify-content: space-between; gap: 10px; margin-bottom: 10px">
+          <span class="dbgtitle" :title="detailRow?.fileName ?? ''">
+            速度详情 · {{ detailRow?.fileName ?? '' }}
+            <span v-if="detailRow" class="chip" :class="statusClass(detailRow.statusCode)"
+                  style="margin-left: 8px; vertical-align: 1px">{{ detailRow.statusText }}</span>
+          </span>
+          <button class="btn text small" style="flex: none" @click="closeDetail">关闭</button>
+        </div>
+
+        <template v-if="detailRow">
+          <!-- 指标行：总大小 / 已下载 / 平均速度 / 峰值速度（样本 max）/ 用时 -->
+          <div class="speedmetrics">
+            <span>总大小 <b>{{ detailRow.total > 0 ? fmtBytes(detailRow.total) : '—' }}</b></span>
+            <span>已下载 <b>{{ fmtBytes(detailRow.downloaded) }}</b></span>
+            <span>平均速度 <b>{{ fmtSpeed(avgSpeedOf(detailRow)) }}</b></span>
+            <span>峰值速度 <b>{{ detailStats.peak > 0 ? fmtSpeed(detailStats.peak) : '—' }}</b></span>
+            <span>用时 <b>{{ fmtRemain(detailDurationMs) }}</b></span>
+          </div>
+
+          <div class="speedlegend">
+            <span><i class="lg-line" />速度（左轴）</span>
+            <span><i class="lg-dash" />已下载（右轴 · 占总大小 %）</span>
+            <span v-if="detailStats.count > 0" class="hint" style="margin: 0">已采样 {{ detailStats.count }} 点</span>
+          </div>
+
+          <svg v-if="detailChart" class="speedsvg" :viewBox="detailChart.viewBox" role="img" aria-label="速度与已下载量曲线图">
+            <!-- 网格线 4 条：左刻度 = 速度档位，右刻度 = 下载量百分比（两轴共用同一套高度） -->
+            <g v-for="(g, i) in detailChart.grid" :key="i">
+              <line class="grid" :x1="detailChart.l" :x2="detailChart.r" :y1="g.y" :y2="g.y" />
+              <text class="tick tl" :x="detailChart.l - 6" :y="g.y + 3">{{ g.speed }}</text>
+              <text class="tick tr" :x="detailChart.r + 6" :y="g.y + 3">{{ g.pct }}</text>
+            </g>
+            <!-- X 轴基线 + 首中尾时间刻度 -->
+            <line class="axis" :x1="detailChart.l" :x2="detailChart.r" :y1="detailChart.b" :y2="detailChart.b" />
+            <text v-for="(xt, i) in detailChart.xTicks" :key="'x' + i" class="tick tx"
+                  :x="xt.x" :y="detailChart.b + 15"
+                  :text-anchor="i === 0 ? 'start' : i === detailChart.xTicks.length - 1 ? 'end' : 'middle'">
+              {{ xt.label }}
+            </text>
+            <!-- 已下载量阶梯线（虚线灰，右轴）→ 速度面积 → 速度折线（主色，左轴）-->
+            <path v-if="detailChart.dlPathD" class="dl" :d="detailChart.dlPathD" />
+            <path class="area" :d="detailChart.areaPathD" />
+            <path class="line" :d="detailChart.speedPathD" />
+          </svg>
+          <div v-else class="speedempty">
+            <span>本页打开后未记录到速度样本</span>
+            <span class="hint" style="margin: 0">速度为会话内采样（每 0.8 秒记录一次下载中的任务），应用重启后无历史</span>
+          </div>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1126,4 +1373,31 @@ onUnmounted(() => {
   font-size: 12px; line-height: 1.6; color: var(--on-bg-variant); }
 .dbglogline { white-space: pre-wrap; word-break: break-all; }
 .dbgpath { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 速度详情弹窗：指标行 + 图例 + 手写 SVG 双轴曲线图（速度=主色折线+面积，已下载=灰虚线阶梯） */
+.speeddlg { width: min(720px, 94vw); }
+.speedmetrics { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  font-size: 12.5px; color: var(--on-bg-variant); margin-bottom: 8px; }
+.speedmetrics b { color: var(--on-bg); font-weight: 600; }
+.speedlegend { display: flex; align-items: center; gap: 16px; font-size: 12px;
+  color: var(--on-bg-variant); margin-bottom: 6px; }
+.lg-line, .lg-dash { display: inline-block; width: 20px; height: 0; vertical-align: middle;
+  margin-right: 6px; border-top: 2px solid var(--primary); }
+.lg-dash { border-top-style: dashed; border-top-color: var(--on-bg-variant); }
+.speedsvg { width: 100%; height: auto; display: block; background: var(--surface-container);
+  border-radius: 10px; }
+.speedsvg .grid { stroke: var(--outline-variant); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.55; }
+.speedsvg .axis { stroke: var(--outline-variant); stroke-width: 1; }
+.speedsvg .tick { font-size: 10px; fill: var(--on-bg-variant); }
+.speedsvg .tl { text-anchor: end; }
+.speedsvg .tr { text-anchor: start; }
+.speedsvg .line { fill: none; stroke: var(--primary); stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
+.speedsvg .area { fill: var(--primary); fill-opacity: 0.13; }
+.speedsvg .dl { fill: none; stroke: var(--on-bg-variant); stroke-width: 1.5;
+  stroke-dasharray: 5 4; opacity: 0.85; }
+.speedempty { height: 200px; display: flex; flex-direction: column; gap: 6px;
+  align-items: center; justify-content: center; text-align: center; padding: 0 24px;
+  background: var(--surface-container); border-radius: 10px;
+  color: var(--on-bg-variant); font-size: 13px; }
 </style>
