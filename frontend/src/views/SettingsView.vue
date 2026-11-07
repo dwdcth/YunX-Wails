@@ -278,10 +278,12 @@ function syncSpeedInput() {
   speedInput.value = v
   speedUnit.value = unit
 }
-/** 用户改动 → 换算回字节存库 */
+/** 实时预览的字节/秒（跟随输入即时更新，不落库） */
+const speedPreviewBytes = computed(() => speedToBytes(speedInput.value || 0, speedUnit.value))
+
+/** 用户确认（@change/回车）→ 换算回字节存库 */
 function onSpeedChange() {
-  if (s.value) s.value.downloadSpeedLimit = speedToBytes(speedInput.value || 0, speedUnit.value)
-  save('downloadSpeedLimit', speedToBytes(speedInput.value || 0, speedUnit.value))
+  save('downloadSpeedLimit', speedPreviewBytes.value)
 }
 
 // ---- 下载引擎（普通下载：aria2-next + 内置 FTP；对位原版 DownloadEngineScreen，替代 Gopeed 占位）----
@@ -670,7 +672,7 @@ onMounted(() => {
           </div>
         </div>
         <span class="hint" style="flex: 1; align-self: flex-end; padding-bottom: 6px">
-          = {{ fmtBytes(Number(s.downloadSpeedLimit) || 0) }}/s（{{ s.downloadSpeedLimit > 0 ? '已限速' : '不限速' }}）
+          = {{ fmtBytes(speedPreviewBytes) }}/s（{{ speedPreviewBytes > 0 ? '已限速' : '不限速' }}）
         </span>
       </div>
       <div class="row">
