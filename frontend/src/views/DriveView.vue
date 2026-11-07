@@ -86,6 +86,22 @@ function clearSel() {
   showShare.value = false
 }
 
+/** 全选三态（当前目录全部文件；分块渲染只影响展示，选中集合按整个 files 判定）：
+ *  true=全选 / null=半选 / false=未选 */
+const allFilesState = computed<boolean | null>(() => {
+  const list = files.value
+  if (list.length === 0) return false
+  let n = 0
+  for (const f of list) if (selected.value.has(f.fid)) n++
+  return n === 0 ? false : n === list.length ? true : null
+})
+
+/** 全选开关：选中当前目录全部文件（文件列表不含「..」，上级导航走面包屑）；再点取消全选 */
+function toggleSelectAll() {
+  if (allFilesState.value === true) selected.value.clear()
+  else for (const f of files.value) selected.value.add(f.fid)
+}
+
 const quotaOf = (key: string) => quotas.value[key]
 const byPlatform = computed(() => {
   const m = new Map<string, AccountEntry[]>()
@@ -331,6 +347,14 @@ onMounted(() => {
             <span class="chip">{{ platformMeta.name }}</span>
             <button class="btn text small" :disabled="listLoading" @click="reloadCurrent()">刷新</button>
             <button class="btn text small" @click="showMkdir = !showMkdir">新建文件夹</button>
+            <!-- 全选：作用于当前目录全部文件；选中后「创建分享」等批量操作按已选集合生效 -->
+            <span v-if="files.length > 0" class="selall" title="选中/取消选中当前目录全部文件"
+                  @click="toggleSelectAll">
+              <span class="ck" :class="{ on: allFilesState === true, half: allFilesState === null }">
+                <AppIcon v-if="allFilesState === true" name="check" :size="13" />
+              </span>
+              全选
+            </span>
             <button v-if="selected.size > 0" class="btn tonal small" @click="showShare = !showShare">
               创建分享（已选 {{ selected.size }}）
             </button>
@@ -497,6 +521,14 @@ onMounted(() => {
   cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center;
   color: var(--on-primary); }
 .ck.on { background: var(--primary); border-color: var(--primary); }
+/* 半选态（indeterminate）：实底 + 居中横杠（AppIcon 无减号图标，纯 CSS 画） */
+.ck.half { background: var(--primary); border-color: var(--primary); }
+.ck.half::after { content: ''; width: 10px; height: 2px; border-radius: 1px; background: var(--on-primary); }
+/* 工具栏「全选」控件：复选框 + 文案（与行复选共用 .ck，风格对齐下载页） */
+.selall { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex: none;
+  font-size: 13px; color: var(--on-bg-variant); user-select: none; }
+.selall:hover { color: var(--on-bg); }
+.selall:hover .ck { border-color: var(--primary); }
 .ficon { color: var(--on-bg-variant); display: flex; }
 .fname { flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filerow .fname { cursor: pointer; }

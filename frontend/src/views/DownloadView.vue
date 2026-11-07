@@ -3,7 +3,7 @@
 // 云盘任务：download_submit / download_list 800ms 轮询（核心侧 500ms 落盘节流 + 内存实时速度）。
 // 普通下载任务：NormalDownloadSubmit / NormalDownloadList 同频轮询（独立库 downloads.db；
 // 磁力/BT/ed2k/Metalink/HTTP → aria2-next，FTP → Go 内置引擎）→ 两库合并一张列表，按来源路由行内操作。
-// 扩展：行复选多选批量操作 / 全局批量栏（全部暂停/开始/删除，同时作用两个引擎）/ 按目录分组 /
+// 扩展：行复选多选批量操作 / 工具栏全选（三态，只作用于当前页签+搜索的可见行）/ 全局批量栏（全部暂停/开始/删除，同时作用两个引擎）/ 按目录分组 /
 // 行内 ⋯ 菜单（复制链接/重新下载/打开文件）/ ffmpeg 合轨进度（download_list stats.mergePercent 橙色条）/
 // 文件夹批量任务（share_folder_download 的 batch_list 轮询）/ 下载调试弹窗（仅云盘任务；对齐原版 DownloadDebugScreen）/
 // 速度详情弹窗（会话内 800ms 速度采样 → 手写 SVG 双轴曲线：速度折线+面积 / 已下载阶梯线）。
@@ -11,7 +11,7 @@
 // （云盘 avgSpeed、普通任务 downloaded÷任务耗时）、失败不显示。
 // 列表工具栏（迅雷式）：状态页签（全部/下载中/失败/完成，带计数）+ 文件名搜索 + 排序（时间/文件名/大小·升降序），
 // 管线顺序 = 页签过滤 → 搜索 → 排序 → 分组（组内按当前排序，组间按组内最新任务时间倒序）。
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   batchList, downloadDebugExport, downloadDebugInfo, downloadGetLink, downloadList,
   downloadListFull, downloadPause, downloadPauseAll, downloadDebugPreempt, downloadRedownload,
@@ -217,6 +217,18 @@ const visibleRows = computed<MergedRow[]>(() => {
     .sort(cmpRow)
 })
 
+/** 分页（迅雷式）：页大小 50，页签/搜索/排序变化自动回第 1 页 */
+const PAGE_SIZE = 50
+const page = ref(1)
+const pageCount = computed(() => Math.max(1, Math.ceil(visibleRows.value.length / PAGE_SIZE)))
+const pageRows = computed<MergedRow[]>(() =>
+  visibleRows.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE))
+watch([activeTab, search, sortKey, sortDesc], () => { page.value = 1 })
+watch(page, () => {
+  const el = document.querySelector('.content')
+  if (el) requestAnimationFrame(() => { el.scrollTop = 0 })
+})
+
 function onSortKeyChange(e: Event) {
   const v = (e.target as HTMLSelectElement).value
   sortKey.value = v === 'name' || v === 'size' ? v : 'time'
@@ -292,6 +304,25 @@ async function act(fn: () => Promise<unknown>) {
 function toggleSel(key: string) {
   if (selected.value.has(key)) selected.value.delete(key)
   else selected.value.add(key)
+}
+
+/** 全选三态（按当前页签+搜索过滤后的「可见行」判定）：true=全选 / null=半选 / false=可见行无选中。
+ *  被过滤隐藏的已选行不参与判定但保持选中（批量栏始终按整个已选集合生效） */
+const allVisibleState = computed<boolean | null>(() => {
+  const vis = visibleRows.value
+  if (vis.length === 0) return false
+  let n = 0
+  for (const r of vis) if (selected.value.has(r.key)) n++
+  return n === 0 ? false : n === vis.length ? true : null
+})
+
+/** 全选开关：全或无切换当前可见行（页签+搜索结果）；被过滤隐藏的行选中态不动 */
+function toggleSelAll() {
+  const allOn = allVisibleState.value === true
+  for (const r of visibleRows.value) {
+    if (allOn) selected.value.delete(r.key)
+    else selected.value.add(r.key)
+  }
 }
 
 /** 批量操作：按行来源路由到对应引擎（单个失败继续处理其余），完成后刷新并清空选择 */
@@ -439,7 +470,7 @@ function dirOfPath(p: string): string {
 /** 按目录分组：组内保持当前排序（插入序即排序序），组间按组内最新任务时间倒序 */
 const groups = computed(() => {
   const m = new Map<string, MergedRow[]>()
-  for (const row of visibleRows.value) {
+  for (const row of pageRows.value) {
     const d = dirOfPath(row.savePath) || '（未知目录）'
     const list = m.get(d) ?? []
     list.push(row)
@@ -452,7 +483,7 @@ const groups = computed(() => {
 
 /** 统一分段：分组=按目录切段（带标题），平铺=单段（无标题），行渲染只写一份 */
 const sections = computed(() =>
-  grouped.value ? groups.value : [{ dir: '', list: visibleRows.value }])
+  grouped.value ? groups.value : [{ dir: '', list: pageRows.value }])
 
 function batchPct(b: BatchTask): number {
   return b.total > 0 ? Math.min(100, Math.round((b.done / b.total) * 100)) : 0
@@ -992,11 +1023,22 @@ onUnmounted(() => {
     <!-- 列表工具栏：状态页签（迅雷式，带计数）+ 文件名搜索 + 排序 + 按目录分组（两库任务统一按 savePath 所在目录分组） -->
     <div v-if="rows.length > 0" class="card" style="padding: 10px 20px">
       <div class="row" style="justify-content: space-between; gap: 10px">
-        <div class="tabs">
-          <button v-for="t in TABS" :key="t.key" class="tab" :class="{ on: activeTab === t.key }"
-                  @click="activeTab = t.key">
-            {{ t.label }}<span class="cnt">{{ tabCount(t.key) }}</span>
-          </button>
+        <div class="row" style="gap: 12px; min-width: 0; flex-wrap: wrap">
+          <!-- 全选：只作用于当前页签+搜索结果里的可见行（三态）；被过滤隐藏的已选行保持选中 -->
+          <span class="selall" title="全选/取消全选当前页签+搜索结果中的可见任务（被过滤隐藏的已选任务保持选中）"
+                @click="toggleSelAll">
+            <span class="ck" :class="{ on: allVisibleState === true, half: allVisibleState === null }">
+              <AppIcon v-if="allVisibleState === true" name="check" :size="13" />
+            </span>
+            <span>全选</span>
+            <span v-if="selected.size > 0" class="chip plain selcnt">已选 {{ selected.size }}</span>
+          </span>
+          <div class="tabs">
+            <button v-for="t in TABS" :key="t.key" class="tab" :class="{ on: activeTab === t.key }"
+                    @click="activeTab = t.key">
+              {{ t.label }}<span class="cnt">{{ tabCount(t.key) }}</span>
+            </button>
+          </div>
         </div>
         <span class="row" style="gap: 8px; flex: none; flex-wrap: wrap">
           <span class="searchbox">
@@ -1034,6 +1076,13 @@ onUnmounted(() => {
       <div class="empty" style="padding: 16px 0">
         <p style="margin: 0">{{ emptyText }}</p>
       </div>
+
+    <!-- 分页栏（仅超出单页时显示） -->
+    <div v-if="visibleRows.length > PAGE_SIZE" class="pagerow">
+      <button class="btn text small" :disabled="page <= 1" @click="page--">‹ 上一页</button>
+      <span class="dim">第 {{ page }} / {{ pageCount }} 页 · 共 {{ visibleRows.length }} 条</span>
+      <button class="btn text small" :disabled="page >= pageCount" @click="page++">下一页 ›</button>
+    </div>
     </div>
 
     <!-- 任务列表：分组 / 平铺共用同一套行渲染（云盘任务与普通任务合并，来源徽标区分） -->
@@ -1294,6 +1343,15 @@ onUnmounted(() => {
   cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center;
   color: var(--on-primary); }
 .ck.on { background: var(--primary); border-color: var(--primary); }
+/* 半选态（indeterminate）：实底 + 居中横杠（AppIcon 无减号图标，纯 CSS 画） */
+.ck.half { background: var(--primary); border-color: var(--primary); }
+.ck.half::after { content: ''; width: 10px; height: 2px; border-radius: 1px; background: var(--on-primary); }
+/* 工具栏「全选」控件：复选框 + 文案 +「已选 N」计数（chip 风格，与行复选共用 .ck） */
+.selall { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex: none;
+  font-size: 13px; color: var(--on-bg-variant); user-select: none; }
+.selall:hover { color: var(--on-bg); }
+.selall:hover .ck { border-color: var(--primary); }
+.selcnt { font-size: 11.5px; padding: 1px 8px; }
 
 /* 列表工具栏：状态页签（胶囊选中态，对齐设置页 .seg / 侧栏 rail-pill 风格）+ 搜索框 + 排序下拉 */
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -1400,4 +1458,6 @@ onUnmounted(() => {
   align-items: center; justify-content: center; text-align: center; padding: 0 24px;
   background: var(--surface-container); border-radius: 10px;
   color: var(--on-bg-variant); font-size: 13px; }
+.pagerow { display: flex; align-items: center; justify-content: center; gap: 14px;
+  padding: 8px 0 2px; color: var(--on-bg-variant); font-size: 13px; }
 </style>
