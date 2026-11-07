@@ -466,30 +466,25 @@ func (m *Manager) Resume(id int64) error {
 // 仅对可直接 addUri 的来源（magnet/ed2k/bc1 与非 .torrent/.metalink 后缀的 http URL——
 // URL 版种子/索引的判定恰好只在后缀命中，故该判别是精确的）；本地种子/metalink 请重新提交。
 func (m *Manager) retryAria2(t *Task) error {
-	lower := strings.ToLower(t.URL)
-	path := lower
-	if i := strings.IndexAny(path, "?#"); i >= 0 {
-		path = path[:i]
-	}
-	retryable := strings.HasPrefix(lower, "magnet:") || strings.HasPrefix(lower, "ed2k:") ||
-		strings.HasPrefix(lower, "bc1:") ||
-		((strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) &&
-			!strings.HasSuffix(path, ".torrent") && !strings.HasSuffix(path, ".metalink") && !strings.HasSuffix(path, ".meta4"))
-	if !retryable {
-		return fmt.Errorf("该任务失败后暂不支持原地重试，请移除后重新提交")
-	}
+	// 摘旧 gid（aria2 可能已重启，旧 GID 无效）
 	if t.Gid != "" {
 		_ = m.aria2.Remove(t.Gid)
 	}
-	gid, err := m.aria2.AddURI([]string{t.URL}, map[string]any{"dir": t.SaveDir})
+	// 走完整 Submit 流水线（分类→URL 直提/torrent 下载→addTorrent/metalink 转换→addMetalink）
+	// ★ 同名文件跳过检测（IfExistsSkip）：retry 场景目标文件是半成品或不存在
+	res, err := m.SubmitOpts(t.URL, t.SaveDir, SubmitOpts{IfExists: IfExistsOverwrite})
 	if err != nil {
 		return fmt.Errorf("重新提交失败: %w", err)
 	}
-	t.Gid = gid
-	t.Status = StatusPending
-	t.Err = ""
-	t.Speed = 0
-	return m.db.UpdateTask(t)
+	if res.Exists || res.Skipped {
+		return fmt.Errorf("同名文件冲突，请手动处理")
+	}
+	// 用新任务替换旧任务：删旧行
+	if err := m.db.DeleteTask(t.ID); err != nil {
+		// 删不掉不阻断——新任务已在跑
+	}
+	_ = res // 新任务 ID 在 res.TaskID（前端下次 List 会看到）
+	return nil
 }
 
 // Remove 移除单任务（aria2 侧摘下载；不删已下载文件）。
