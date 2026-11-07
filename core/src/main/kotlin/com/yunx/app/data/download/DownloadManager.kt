@@ -32,10 +32,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -56,6 +58,38 @@ import org.json.JSONObject
 import kotlin.coroutines.coroutineContext
 import kotlin.math.ceil
 import kotlin.math.min
+
+/**
+ * 「继续下载」（download_resume / start）的真实结果。
+ * 修复「resume 假成功」：以前无论任务处于什么状态都回 ok，调用方无法区分
+ * 「真的恢复了」「本来就已在跑」「任务其实早已完成（继续 = 整文件重下）」。
+ */
+enum class ResumeResult {
+    /** 已启动（或转发引擎）新的下载协程 */
+    STARTED,
+    /** 任务协程仍在运行（下载/收尾中），本次为幂等无操作 */
+    ALREADY_RUNNING,
+    /** 任务已完成：拒绝重跑（旧实现会把成品重下一遍并落第二个时间戳副本） */
+    ALREADY_COMPLETED,
+    /** 任务不存在（已被删除） */
+    NOT_FOUND
+}
+
+/**
+ * 「暂停下载」（download_pause / pause）的真实结果。
+ * 修复「pause 假成功」：以前对已完成/不存在的任务也回 paused:true，
+ * 且会把 COMPLETED 强行翻成 PAUSED（用户实测：最后阶段暂停后任务永远「已暂停」）。
+ */
+enum class PauseResult {
+    /** 已取消运行中的任务协程并落 PAUSED */
+    PAUSED,
+    /** 任务已完成：暂停无意义，保持 COMPLETED（收尾阶段点暂停 = 等它完成） */
+    ALREADY_COMPLETED,
+    /** 任务已暂停/已失败等非运行态：幂等无操作 */
+    ALREADY_IDLE,
+    /** 任务不存在（已被删除） */
+    NOT_FOUND
+}
 
 /** 实时下载统计（用于 UI 展示速度/剩余时间/线程数） */
 data class DownloadStats(
@@ -926,13 +960,29 @@ class DownloadManager(
         return true
     }
 
-    /** 开始/恢复下载（断点续传） */
-    fun start(id: Long, headers: Map<String, String> = emptyMap()) {
+    /** 开始/恢复下载（断点续传）；返回真实结果，调用方据此回真话而不是恒 ok */
+    fun start(id: Long, headers: Map<String, String> = emptyMap()): ResumeResult {
         // 引擎任务：转发「继续」给 Gopeed（绝不能让内置下载器用同一 URL 再下一次）
         val engineId = engineTaskIds[id]
         if (engineId != null) {
             resumeEngineTask(id, engineId)
-            return
+            return ResumeResult.STARTED
+        }
+        // ★ 状态机守卫：已完成任务拒绝「继续」。旧实现不查状态直接重跑 —— 对一个
+        //   已完成任务 resume = 把成品文件整个重下一遍，且 openDestination 发现主名
+        //   已存在会换 <name>_<时间戳> 落第二个完整副本（用户实测双文件的来源之一）。
+        //   单行 SQLite 读（Dispatchers.IO），DLL 命令线程上阻塞可忽略。
+        when (runBlocking { dao.get(id) }?.status) {
+            null -> {
+                Log.w(TAG, "start: id=$id 任务不存在，忽略继续请求")
+                return ResumeResult.NOT_FOUND
+            }
+            DownloadTaskEntity.STATUS_COMPLETED -> {
+                Log.i(TAG, "start: id=$id 任务已完成，忽略继续请求")
+                DownloadDebugLog.record(id, "继续被忽略", "任务已完成，无需继续")
+                return ResumeResult.ALREADY_COMPLETED
+            }
+            else -> {}
         }
         // 恢复时未传 headers：沿用入队时保存的（Cookie/UA 对直链下载是必需的）
         val effectiveHeaders = headers.ifEmpty { taskHeaders[id] ?: emptyMap() }
@@ -944,7 +994,9 @@ class DownloadManager(
             val existing = activeJobs[id]
             if (existing != null) {
                 // job 仍活跃（正在下载/收尾）：忽略本次 start，避免重复启动
-                if (existing.isCompleted && existing.getCompleted().isActive) return
+                if (existing.isCompleted && existing.getCompleted().isActive) {
+                    return ResumeResult.ALREADY_RUNNING
+                }
                 // job 已结束但 finally 尚未清理（暂停后立即恢复的残留）：
                 // 移除旧引用，继续注册新 job，保证"点开始"立即生效
                 activeJobs.remove(id)
@@ -1024,6 +1076,7 @@ class DownloadManager(
             // launch 是同步返回 Job 的，锁内 complete，pause/remove 的 await 立即返回
             deferred.complete(job)
         }
+        return ResumeResult.STARTED
     }
 
     /** 任务开始/结束计数 + Windows 系统集成（阻止休眠 / 通知中心进度） */
@@ -1042,8 +1095,8 @@ class DownloadManager(
         }
     }
 
-    /** 暂停下载（保留 part 文件与请求头） */
-    fun pause(id: Long) {
+    /** 暂停下载（保留 part 文件与请求头）；返回真实结果，调用方据此回真话而不是恒 ok */
+    fun pause(id: Long): PauseResult {
         Log.d(TAG, "pause: id=$id")
         DiagnosticLog.event(DiagnosticLog.OPERATION, "download_pause", "id=$id")
         DownloadDebugLog.record(id, "暂停", "用户暂停，分片文件保留")
@@ -1051,7 +1104,24 @@ class DownloadManager(
         val engineId = engineTaskIds[id]
         if (engineId != null) {
             pauseEngineTask(id, engineId)
-            return
+            return PauseResult.PAUSED
+        }
+        // ★ 状态机守卫（同步单行读）：对已完成/非运行态任务，暂停是不可达迁移。
+        //   旧实现无条件把状态写成 PAUSED —— 下载刚完成时点一下暂停，COMPLETED 就被
+        //   翻成 PAUSED@100%，之后「继续」再把成品整个重下一遍（用户实测①②的直接根因）。
+        when (runBlocking { dao.get(id) }?.status) {
+            null -> {
+                Log.w(TAG, "pause: id=$id 任务不存在，忽略暂停请求")
+                return PauseResult.NOT_FOUND
+            }
+            DownloadTaskEntity.STATUS_COMPLETED -> {
+                Log.i(TAG, "pause: id=$id 任务已完成，忽略暂停请求（保持已完成）")
+                DownloadDebugLog.record(id, "暂停被忽略", "任务已完成，保持完成态")
+                return PauseResult.ALREADY_COMPLETED
+            }
+            DownloadTaskEntity.STATUS_PAUSED, DownloadTaskEntity.STATUS_FAILED ->
+                return PauseResult.ALREADY_IDLE
+            else -> {}
         }
         // 立即中断该任务所有分片网络请求（不依赖协程取消传播，阻塞 IO 马上停止）
         downloader.cancelCalls(id)
@@ -1061,19 +1131,36 @@ class DownloadManager(
             // 等协程真正退出（确保没有半截写入）后，以磁盘 part/seg 真实大小为准回写进度：
             // 暂停瞬间最后一次 onBytes 可能被取消丢弃，DB 落后于磁盘 → 恢复时进度回跳
             deferred?.let { runCatching { it.await().cancelAndJoin() } }
+            // ★ 回写前再校验一次状态机（用户快速 pause→resume 的竞态）：
+            //   cancelAndJoin 等待收尾期间，任务可能已被新的 start() 接管（activeJobs 出现
+            //   新 job），或已在不可取消收尾里落成 COMPLETED。旧实现此刻无条件写 PAUSED，
+            //   会把新任务的 DOWNLOADING / 刚落成的 COMPLETED 盖成「已暂停」——界面从此
+            //   永远显示已暂停、点继续也没反应（用户实测①的另一半根因）。
+            val newerJob = synchronized(jobsLock) { activeJobs[id] }
+            val newerRunning = newerJob?.let { !it.isCompleted || it.getCompleted().isActive } == true
+            val t = dao.get(id) ?: return@launch
+            if (newerRunning ||
+                (t.status != DownloadTaskEntity.STATUS_DOWNLOADING &&
+                    t.status != DownloadTaskEntity.STATUS_PENDING)
+            ) {
+                Log.i(
+                    TAG, "pause: id=$id 回写被跳过（新任务已接管=${newerRunning} 当前状态=${t.status}）"
+                )
+                return@launch
+            }
             val real = chunkDirOf(id).listFiles()
                 ?.filter {
                     it.name.startsWith("part_") ||
                         (it.name.startsWith("seg_") && it.name.endsWith(".part"))
                 }
                 ?.sumOf { it.length() } ?: 0L
-            val t = dao.get(id)
-            if (t != null && real > t.downloadedSize) {
+            if (real > t.downloadedSize) {
                 dao.updateProgress(id, DownloadTaskEntity.STATUS_PAUSED, real, t.totalSize)
             } else {
                 dao.updateStatus(id, DownloadTaskEntity.STATUS_PAUSED)
             }
         }
+        return PauseResult.PAUSED
     }
 
     /**
@@ -3222,11 +3309,16 @@ class DownloadManager(
         finalName: String,
         total: Long
     ) {
-        val savedPath = withContext(Dispatchers.IO) {
-            DownloadSaver.commitDirectPart(part, destDir, finalName)
+        // ★ 改名提交 + 落 COMPLETED 必须一口气完成（NonCancellable）：中途被暂停会留下
+        //   「成品已改名在盘、任务未完成」的现场，恢复后按新时间戳名再落一份（双文件）。
+        val savedPath = withContext(Dispatchers.IO + NonCancellable) {
+            val moved = DownloadSaver.commitDirectPart(part, destDir, finalName)
+            if (moved != null) {
+                dao.updateDirect(id, "", 0)
+                completeWithAvg(id, moved, total)
+            }
+            moved
         } ?: throw IllegalStateException("直写：无法创建最终文件（目标目录不可用或文件名冲突）")
-        dao.updateDirect(id, "", 0)
-        completeWithAvg(id, savedPath, total)
         Log.d(TAG, "runDirectSingle: id=$id 直写完成 savedPath=$savedPath size=$total")
         DownloadDebugLog.record(id, "直写完成", "path=$savedPath size=$total")
         taskCallbacks.remove(id)?.let { cb -> runCatching { cb() } }
@@ -3478,11 +3570,15 @@ class DownloadManager(
                     throw IllegalStateException("直写文件大小校验失败：期望 $total 字节，实际 ${part.length()} 字节")
                 }
             }
-            val savedPath = withContext(Dispatchers.IO) {
-                DownloadSaver.commitDirectPart(part, destDir, loc.finalName)
+            // ★ 改名提交 + 落 COMPLETED 一口气完成（NonCancellable，理由同 commitDirectSingle）
+            val savedPath = withContext(Dispatchers.IO + NonCancellable) {
+                val moved = DownloadSaver.commitDirectPart(part, destDir, loc.finalName)
+                if (moved != null) {
+                    dao.updateDirect(id, "", 0)
+                    completeWithAvg(id, moved, total)
+                }
+                moved
             } ?: throw IllegalStateException("直写：无法创建最终文件（目标目录不可用或文件名冲突）")
-            dao.updateDirect(id, "", 0)
-            completeWithAvg(id, savedPath, total)
             Log.d(TAG, "runDirectMulti: id=$id 直写完成 savedPath=$savedPath size=$total chunks=$chunkCount")
             DownloadDebugLog.record(id, "直写完成", "path=$savedPath size=$total chunks=$chunkCount")
             taskCallbacks.remove(id)?.let { cb -> runCatching { cb() } }
@@ -3573,6 +3669,19 @@ class DownloadManager(
         )
         DownloadDebugLog.record(id, "开始合并", "分片数=${chunkFiles.size} 目标=$fileName 合计=$mergeTotal")
         reportMergeProgress(0L)
+        // ★ 重入防护（双文件修复）：目标目录已存在「主名 + 大小完全一致」的文件 ⇒ 这是
+        //   本任务上一次合并已提交的成品（旧版本在 commit 后被暂停/取消会留下这种现场：
+        //   文件完整在盘、任务却停在 PAUSED@100%）。跳过重新合并直接按完成收尾 ——
+        //   否则 openDestination 发现主名被占会换 <name>_<时间戳> 再写一份完整副本，
+        //   目录里出现两个都能用的文件（用户实测②）。
+        DownloadSaver.existingExactSizedTarget(fileName, saveDir, mergeTotal)?.let { adopted ->
+            Log.i(TAG, "finishDownload: id=$id 目标已存在同名同大小成品，跳过合并直接完成：$adopted")
+            DownloadDebugLog.record(id, "跳过合并", "目标已存在同名同大小成品，直接按完成处理：$adopted")
+            withContext(NonCancellable) {
+                finalizeCompletedDownload(id, chunkDir, chunkFiles, adopted, total)
+            }
+            return
+        }
         // 合并前再确认一次下载盘空间：分片还占着缓存，目标位置需要完整一份文件的空间。
         // 不足时保留分片并给出原因，用户清理磁盘后可继续（不会生成半截文件）。
         // 多个任务可能同时进入合并阶段，这里把其它正在合并的任务所需空间一起算上。
@@ -3634,6 +3743,14 @@ class DownloadManager(
                     throw IllegalStateException("文件大小校验失败：期望 $total 字节，实际 $written 字节（已拒绝保存损坏文件）")
                 }
                 dest.commit()
+                // ★ 提交成功 = 成品已完整落盘，收尾（写 COMPLETED / 清分片 / 回调）必须在
+                //   NonCancellable 里一口气做完。旧实现收尾在 withContext 之外，暂停竞态会把
+                //   「文件已写完但状态没落成」留成 PAUSED@100% → 恢复后再次合并 → openDestination
+                //   换时间戳名 → 目录里两个完整文件；且 cancelAndJoin 等待期间用户看到任务
+                //   长时间「已暂停」点继续无反应。提交后收尾不再响应取消（点暂停 = 等它完成）。
+                withContext(NonCancellable) {
+                    finalizeCompletedDownload(id, chunkDir, chunkFiles, dest.path, total)
+                }
                 dest.path
             } catch (e: Exception) {
                 // 失败/取消：删掉半成品目标文件；★ 分片一律保留（mergeChunksToStream 不再边写边删），
@@ -3652,12 +3769,28 @@ class DownloadManager(
             // 合并写入结束（成功或失败）：释放目标盘的预留名额
             synchronized(spaceGuardLock) { mergingDestBytes.remove(id) }
         }
+        Log.d(TAG, "finishDownload: id=$id 下载完成 savedPath=$savedPath size=$total")
+    }
+
+    /**
+     * 成品收尾：写 COMPLETED（含平均速度）、触发完成回调、清合并进度与分片目录。
+     *
+     * ★ 必须在 [NonCancellable] 上下文里调用：成品已提交/被采纳后这些步骤不因暂停/删除
+     *   竞态而半途而废 —— 否则会留下「文件完整在盘、任务停在 PAUSED@100%」的现场，
+     *   下一次继续会再合并出第二个完整副本（用户实测「完成后出现两个都能用的文件」）。
+     */
+    private suspend fun finalizeCompletedDownload(
+        id: Long,
+        chunkDir: File,
+        chunkFiles: List<File>,
+        savedPath: String,
+        total: Long
+    ) {
         completeWithAvg(id, savedPath, total)
         DiagnosticLog.log(
             DiagnosticLog.DOWNLOAD, "task_complete", taskId = id, status = "completed", size = total,
             summary = "合并完成 path=$savedPath 分片数=${chunkFiles.size}"
         )
-        Log.d(TAG, "finishDownload: id=$id 下载完成 savedPath=$savedPath size=$total")
         taskCallbacks.remove(id)?.let { cb ->
             runCatching { cb() }
         }

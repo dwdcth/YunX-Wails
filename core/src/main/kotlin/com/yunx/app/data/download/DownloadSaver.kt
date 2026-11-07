@@ -160,6 +160,42 @@ object DownloadSaver {
     }
 
     /**
+     * 「重入防护」（暂停/恢复跨合并的防副本）：主名目标已存在且大小与预期完全一致时返回其绝对路径。
+     *
+     * 主名 = [openDestination] 的首选候选（同名不落时间戳）。命中说明这是本任务上一次合并
+     * 已提交的成品（旧缺陷现场：commit 之后被暂停/取消，文件完整在盘但任务停在 PAUSED@100%）。
+     * 调用方应跳过重新合并直接按完成收尾 —— 否则 openDestination 发现主名被占会换
+     * `<name>_<时间戳>` 再写一份完整副本，目录里出现两个都能用的文件。
+     *
+     * 只认主名：时间戳副本可能是更早的遗留，不能冒认；expectedSize <= 0（大小未知）不采纳。
+     */
+    fun existingExactSizedTarget(fileName: String, targetDirUri: String?, expectedSize: Long): String? {
+        if (expectedSize <= 0) return null
+        return runCatching {
+            val safePath = DownloadPathPolicy.sanitize(
+                fileName,
+                fallbackName = "download_${System.currentTimeMillis()}"
+            ) ?: return@runCatching null
+            val baseDir: File = if (!targetDirUri.isNullOrBlank()) {
+                File(targetDirUri)
+            } else {
+                HostServices.dirs.defaultDownloadDir()
+            }
+            val canonicalBase = baseDir.canonicalFile
+            val destDir = (if (safePath.relativeDirectory.isBlank()) {
+                canonicalBase
+            } else {
+                File(canonicalBase, safePath.relativeDirectory)
+            }).canonicalFile
+            val primary = File(destDir, safePath.fileName).canonicalFile
+            if (!DownloadPathPolicy.isContained(canonicalBase, primary)) return@runCatching null
+            if (primary.isFile && primary.length() == expectedSize) primary.absolutePath else null
+        }.onFailure {
+            Log.w(TAG, "检查已有下载目标失败：${it.message}")
+        }.getOrNull()
+    }
+
+    /**
      * 打开「直接向最终位置写入」的保存目的地（大文件下载主路径）。
      *
      * 与 [save] 的区别：不接收源文件、不自己做拷贝，由调用方边合并分片边写入、边删分片。

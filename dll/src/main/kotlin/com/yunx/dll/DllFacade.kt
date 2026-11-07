@@ -13,6 +13,8 @@ import com.yunx.app.data.download.DownloadManager
 import com.yunx.app.data.download.DownloadResourceDebug
 import com.yunx.app.data.download.DownloadStats
 import com.yunx.app.data.download.DownloadTuning
+import com.yunx.app.data.download.PauseResult
+import com.yunx.app.data.download.ResumeResult
 import com.yunx.app.data.host.HostServices
 import com.yunx.app.data.host.HostStores
 import com.yunx.app.data.host.KeyValueStore
@@ -410,17 +412,41 @@ object DllFacade {
                         )
                     }
                     resp.put("tasks", arr)
+                    // ★ 合并/校验阶段进度（修复「完成后最后阶段像卡死」）：大文件收尾的合并/SHA-256
+                    //   要持续几十秒，期间 DB 进度恒 100%、速度恒 0 —— 前端拿不到合并进度就只能
+                    //   显示「100% + 0B/s 像卡死」。前端 downloadListFull 早已按 stats.mergePercent
+                    //   画橙色合并进度条（DownloadView.vue），此前门面一直没吐这个字段。
+                    val mergingPct = stats.values.map { it.mergePercent }
+                        .filter { it in 0..100 }.maxOrNull() ?: 0
+                    resp.put("stats", JSONObject().put("mergePercent", mergingPct))
                 }
 
                 "download_pause" -> {
-                    downloadManager().pause(req.getLong("taskId"))
-                    resp.put("paused", true)
+                    // 真实结果（修复「暂停假成功」）：已完成/非运行态任务的暂停是不可达迁移，
+                    // 旧实现恒回 paused:true 且会把 COMPLETED 翻成 PAUSED（任务从此卡「已暂停」）
+                    when (downloadManager().pause(req.getLong("taskId"))) {
+                        PauseResult.PAUSED -> resp.put("paused", true)
+                        PauseResult.ALREADY_COMPLETED ->
+                            resp.put("paused", false).put("completed", true)
+                        PauseResult.ALREADY_IDLE ->
+                            resp.put("paused", false).put("idle", true)
+                        PauseResult.NOT_FOUND ->
+                            return error("任务不存在：${req.optLong("taskId")}").toString()
+                    }
                 }
 
                 "download_resume" -> {
-                    // 继续下载与失败重试同一入口（内部按断点续传/重探测处理）
-                    downloadManager().start(req.getLong("taskId"))
-                    resp.put("resumed", true)
+                    // 继续下载与失败重试同一入口（内部按断点续传/重探测处理）。
+                    // 真实结果（修复「继续假成功」）：已完成任务拒绝重跑（旧实现会把成品
+                    // 整个重下一遍并在目录里落第二个时间戳副本）
+                    when (downloadManager().start(req.getLong("taskId"))) {
+                        ResumeResult.STARTED, ResumeResult.ALREADY_RUNNING ->
+                            resp.put("resumed", true)
+                        ResumeResult.ALREADY_COMPLETED ->
+                            resp.put("resumed", false).put("completed", true)
+                        ResumeResult.NOT_FOUND ->
+                            return error("任务不存在：${req.optLong("taskId")}").toString()
+                    }
                 }
 
                 "download_remove" -> {
@@ -1362,20 +1388,24 @@ object DllFacade {
                     val tasks = runBlocking { AppDatabase.get().downloadTaskDao().listAll() }
                     var paused = 0
                     for (t in tasks.filter { it.status == DownloadTaskEntity.STATUS_DOWNLOADING }) {
-                        downloadManager().pause(t.id)
-                        paused++
+                        // 抓取列表到真正 pause 之间任务可能恰好完成：只统计真暂停成功的
+                        if (downloadManager().pause(t.id) == PauseResult.PAUSED) paused++
                     }
                     resp.put("paused", paused)
                 }
 
                 "download_resume_all" -> {
-                    // 暂停(2)与失败(4)同一入口恢复（start 内部按断点续传/重试处理）
+                    // 暂停(2)与失败(4)同一入口恢复（start 内部按断点续传/重试处理；
+                    // 已完成任务在 start 内被拒绝，不会重复下载/落副本）
                     val tasks = runBlocking { AppDatabase.get().downloadTaskDao().listAll() }
                     val resumable = tasks.filter {
                         it.status == DownloadTaskEntity.STATUS_PAUSED || it.status == DownloadTaskEntity.STATUS_FAILED
                     }
-                    for (t in resumable) downloadManager().start(t.id)
-                    resp.put("resumed", resumable.size)
+                    var resumed = 0
+                    for (t in resumable) {
+                        if (downloadManager().start(t.id) == ResumeResult.STARTED) resumed++
+                    }
+                    resp.put("resumed", resumed)
                 }
 
                 "download_remove_all" -> {
