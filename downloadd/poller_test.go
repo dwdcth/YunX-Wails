@@ -136,8 +136,8 @@ func TestPollTaskGidGone(t *testing.T) {
 	tasks := mustPollTasks(t, a)
 	a.pollTask(&tasks[0])
 	got := mustTaskByGid(t, a, "g-ghost")
-	if got.Status != StatusError {
-		t.Fatalf("GID 消失应置 error，实际 %s", got.Status)
+	if got.Status != StatusPaused {
+		t.Fatalf("GID 消失应置 paused（可继续重提），实际 %s", got.Status)
 	}
 }
 
