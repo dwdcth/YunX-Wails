@@ -470,20 +470,38 @@ func (m *Manager) retryAria2(t *Task) error {
 	if t.Gid != "" {
 		_ = m.aria2.Remove(t.Gid)
 	}
-	// 走完整 Submit 流水线（分类→URL 直提/torrent 下载→addTorrent/metalink 转换→addMetalink）
-	// ★ 同名文件跳过检测（IfExistsSkip）：retry 场景目标文件是半成品或不存在
-	res, err := m.SubmitOpts(t.URL, t.SaveDir, SubmitOpts{IfExists: IfExistsOverwrite})
-	if err != nil {
-		return fmt.Errorf("重新提交失败: %w", err)
+	// ★ 重试不走 SubmitOpts 的 IfExists 检测——半成品文件就是要续传的状态，
+	//   删了会丢失已下载数据（aria2 --continue=true 按已有文件大小续传）
+	c := Classify(t.URL)
+	if c.Err != "" {
+		return fmt.Errorf("原链接无法重新分类: %s", c.Err)
 	}
-	if res.Exists || res.Skipped {
-		return fmt.Errorf("同名文件冲突，请手动处理")
+	var gid string
+	var err2 error
+	switch c.Kind {
+	case KindMagnet, KindHTTP:
+		gid, err2 = m.aria2.AddURI([]string{c.URL}, map[string]any{"dir": t.SaveDir})
+	case KindTorrent:
+		gid, err2 = m.aria2.AddTorrent(base64.StdEncoding.EncodeToString(c.TorrentData), map[string]any{"dir": t.SaveDir})
+	case KindMetalink:
+		// metalink 重提：v3→v4 转换后再提
+		res, err3 := m.SubmitOpts(t.URL, t.SaveDir, SubmitOpts{IfExists: IfExistsRename})
+		if err3 != nil { return fmt.Errorf("重新提交失败: %w", err3) }
+		gid = ""
+		_ = res
+	default:
+		return fmt.Errorf("该类型暂不支持重试")
 	}
-	// 用新任务替换旧任务：删旧行
-	if err := m.db.DeleteTask(t.ID); err != nil {
-		// 删不掉不阻断——新任务已在跑
+	if err2 != nil {
+		return fmt.Errorf("重新提交失败: %w", err2)
 	}
-	_ = res // 新任务 ID 在 res.TaskID（前端下次 List 会看到）
+	if gid != "" {
+		t.Gid = gid
+		t.Status = StatusPending
+		t.Err = ""
+		t.Speed = 0
+		return m.db.UpdateTask(t)
+	}
 	return nil
 }
 
