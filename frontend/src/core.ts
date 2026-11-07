@@ -164,17 +164,17 @@ export async function normalDownloadList(): Promise<NormalListResult> {
 
 export interface NormalOpResult { ok: boolean; error?: string }
 
-export function normalDownloadPause(id: number): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadPause(id))
+export async function normalDownloadPause(id: number): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadPause(id))
 }
 
-export function normalDownloadResume(id: number): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadResume(id))
+export async function normalDownloadResume(id: number): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadResume(id))
 }
 
 /** 移除任务（不删已下载文件——对齐云盘 remove 语义） */
-export function normalDownloadRemove(id: number): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadRemove(id))
+export async function normalDownloadRemove(id: number): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadRemove(id))
 }
 
 /** 移除任务并删除已下载的本地文件（云盘 downloadRemove 的 deleteLocal 语义，行菜单「删除任务+文件」用）。
@@ -188,16 +188,16 @@ export async function normalDownloadRemoveFile(id: number): Promise<NormalOpResu
   return { ok: false, error: 'NormalDownloadRemoveFile 绑定尚未生成（需重新生成 bindings）' }
 }
 
-export function normalDownloadPauseAll(): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadPauseAll())
+export async function normalDownloadPauseAll(): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadPauseAll())
 }
 
-export function normalDownloadResumeAll(): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadResumeAll())
+export async function normalDownloadResumeAll(): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadResumeAll())
 }
 
-export function normalDownloadRemoveAll(): Promise<NormalOpResult> {
-  return JSON.parse(CoreService.NormalDownloadRemoveAll())
+export async function normalDownloadRemoveAll(): Promise<NormalOpResult> {
+  return JSON.parse(await CoreService.NormalDownloadRemoveAll())
 }
 
 /** aria2 引擎状态（found=false 表示本机找不到 aria2-next，设置页引导配置 aria2Path） */

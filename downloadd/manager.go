@@ -54,6 +54,33 @@ func Init(dataDir string, hooks Hooks) (*Manager, error) {
 	m := &Manager{dataDir: dataDir, db: db, hooks: hooks}
 	m.aria2 = NewAria2(db, dataDir, Aria2Hooks{KvGet: hooks.KvGet, DefaultDir: m.DefaultDir})
 	m.ftp = NewFTPEngine(db)
+	// FTP 引擎注入全局限速读取器（从正式设置拉，30s 缓存）
+	ftpLimitCache := struct {
+		val int64
+		at  time.Time
+	}{}
+	m.ftp.settingsFn = func() int64 {
+		m.mu.Lock()
+		if time.Since(ftpLimitCache.at) < 30*time.Second {
+			v := ftpLimitCache.val
+			m.mu.Unlock()
+			return v
+		}
+		m.mu.Unlock()
+		if m.hooks.Call == nil { return 0 }
+		raw, err := m.hooks.Call(`{"cmd":"settings_list"}`)
+		if err != nil { return 0 }
+		var r struct {
+			OK       bool           `json:"ok"`
+			Settings map[string]any `json:"settings"`
+		}
+		if json.Unmarshal([]byte(raw), &r) != nil || !r.OK { return 0 }
+		v, _ := numberOf(r.Settings["downloadSpeedLimit"])
+		m.mu.Lock()
+		ftpLimitCache.val, ftpLimitCache.at = v, time.Now()
+		m.mu.Unlock()
+		return v
+	}
 	return m, nil
 }
 
@@ -246,7 +273,8 @@ func (m *Manager) SubmitOpts(source, saveDir string, opts SubmitOpts) (*SubmitRe
 	}
 
 	// 同名文件检测（下载前）：默认返回让前端确认；跳过=同大小视为已下过；重命名=自动加序号
-	if c.Name != "" {
+	// ★ FTP/FTPS 不检查：引擎天然按本地偏移续传，「半文件」就是要续传的状态
+	if c.Name != "" && c.Kind != KindFTP && c.Kind != KindFTPS {
 		target := filepath.Join(saveDir, sanitizeFileName(c.Name))
 		if _, err := os.Stat(target); err == nil {
 			switch opts.IfExists {

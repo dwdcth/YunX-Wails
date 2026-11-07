@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	ftpLimitTickDefault = 100 * time.Millisecond
 	ftpWorkers       = 2                // 并发下载 worker 数
 	ftpDialTimeout   = 15 * time.Second // 连接/登录超时
 	ftpIdleTimeout   = 60 * time.Second // 数据连接读空闲超时
@@ -79,9 +80,10 @@ type ftpCtl struct {
 
 // FTPEngine FTP 队列引擎。
 type FTPEngine struct {
-	db     *DB
-	queue  chan int64
-	stopCh chan struct{}
+	db        *DB
+	queue     chan int64
+	stopCh    chan struct{}
+	settingsFn func() int64 // 全局限速（字节/秒，0=不限）；Manager 注入，每 tick 拉一次
 	wg     sync.WaitGroup
 
 	mu      sync.Mutex
@@ -454,6 +456,10 @@ func (e *FTPEngine) download(ctx context.Context, t *Task) error {
 	var sinceReport int64
 	downloaded := offset
 	buf := make([]byte, 64*1024)
+	// 全局限速令牌桶
+	const limitTick = 100 * time.Millisecond
+	nextRefill := time.Now().Add(limitTick)
+	var budget int64
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -471,6 +477,16 @@ func (e *FTPEngine) download(ctx context.Context, t *Task) error {
 			}
 			downloaded += int64(n)
 			sinceReport += int64(n)
+			// 全局限速（令牌桶）：每 tick 最多放 limit 字节，超出则等下一 tick
+			if limit := e.currentLimit(); limit > 0 {
+				budget -= int64(n)
+				for budget < 0 {
+					wait := time.Until(nextRefill)
+					if wait > 0 { select { case <-ctx.Done(): return e.canceledReason(t.ID); case <-time.After(wait): } }
+					nextRefill = time.Now().Add(limitTick)
+					budget += limit * int64(limitTick) / int64(time.Second)
+				}
+			}
 		}
 		if rerr == io.EOF {
 			break
@@ -527,4 +543,10 @@ func sanitizeFileName(name string) string {
 		return "_"
 	}
 	return name
+}
+
+// currentLimit 全局限速（字节/秒）；settingsFn 为空或读不到返回 0（不限）。
+func (e *FTPEngine) currentLimit() int64 {
+	if e.settingsFn == nil { return 0 }
+	return e.settingsFn()
 }
