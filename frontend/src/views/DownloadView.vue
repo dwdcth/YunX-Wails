@@ -163,7 +163,21 @@ const speedTick = ref(0) // 每轮采样 +1：弹窗打开期间曲线随轮询�
 function sampleSpeeds() {
   const now = Date.now()
   for (const row of rows.value) {
-    if (row.statusCode === 3 || row.statusCode === 4) continue // 完成/失败：停止采样，保留历史
+    if (row.statusCode === 3 || row.statusCode === 4) {
+      // 完成/失败：停止采样，保留历史；秒下/快完成任务（采样 <2 点）用真实耗时区间
+      // 按均速合成基线两点——否则曲线空、峰值缺失（800ms tick 采不到瞬时完成的任务）
+      const list = speedHistory.get(row.key)
+      if (row.statusCode === 3 && (!list || list.length < 2)
+          && !row.cloud && row.createdAt > 0 && row.updatedAt >= row.createdAt && row.downloaded > 0) {
+        const durS = Math.max(1, row.updatedAt - row.createdAt)
+        const avg = row.downloaded / durS
+        speedHistory.set(row.key, [
+          { t: row.createdAt * 1000, speed: avg, downloaded: 0 },
+          { t: row.updatedAt * 1000, speed: avg, downloaded: row.downloaded },
+        ])
+      }
+      continue
+    }
     const sample: SpeedSample = { t: now, speed: row.speed, downloaded: row.downloaded }
     const list = speedHistory.get(row.key)
     if (list) list.push(sample)
@@ -837,6 +851,7 @@ const detailStats = computed(() => {
 })
 
 /** 用时：样本首尾时间差 与 任务自建耗时（updatedAt-createdAt，仅普通任务两字段齐全）取大者（会话内口径） */
+const detailDone = computed(() => detailRow.value?.statusCode === 3)
 const detailDurationMs = computed(() => {
   const row = detailRow.value
   if (!row) return 0
@@ -1290,7 +1305,7 @@ onUnmounted(() => {
             <span>已下载 <b>{{ fmtBytes(detailRow.downloaded) }}</b></span>
             <span>平均速度 <b>{{ fmtSpeed(avgSpeedOf(detailRow)) }}</b></span>
             <span>峰值速度 <b>{{ detailStats.peak > 0 ? fmtSpeed(detailStats.peak) : '—' }}</b></span>
-            <span>用时 <b>{{ fmtRemain(detailDurationMs) }}</b></span>
+            <span>用时 <b>{{ detailDurationMs > 0 ? fmtRemain(detailDurationMs) : (detailDone ? '<1 秒' : '—') }}</b></span>
           </div>
 
           <div class="speedlegend">
