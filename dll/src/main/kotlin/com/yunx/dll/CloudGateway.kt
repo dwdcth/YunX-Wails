@@ -307,6 +307,21 @@ object CloudGateway {
         SharePlatform.LANZOU -> requireLanzou().let { (c, uid, vei) ->
             rg.lanzouApi.getPersonalDownloadLink(c, uid, vei, lzNum(file.fid), file.fname)
         }
-        else -> throw UnsupportedOperationException("该平台的个人盘直链下载暂未接入")
+        SharePlatform.C139 ->
+            rg.c139Api.getDownloadUrl(file.fid, requireC139Cookie())
+                ?: throw IllegalStateException("取直链失败（账号可能未登录）")
+        SharePlatform.PAN123 ->
+            rg.pan123Api.getDownloadLink(file, requirePan123Token())
+                ?: throw IllegalStateException("取直链失败")
+        SharePlatform.PAN115 ->
+            rg.pan115Api.getDownloadLink(file, requirePan115Cookie())
+                ?: throw IllegalStateException("取直链失败")
+        SharePlatform.GUANGYA ->
+            rg.guangyaApi.getDownloadLink(requireGuangYa().first, file)
+                ?: throw IllegalStateException("取直链失败")
+        SharePlatform.ILANZOU -> rg.ilanzouAccount.getAccount()?.let { a ->
+            rg.ilanzouApi.getDownloadLink(a.appToken, a.uuid, file.fid, a.userId)
+        } ?: throw IllegalStateException("取直链失败（未登录蓝奏云优享版）")
+        else -> throw UnsupportedOperationException("该平台的个人盘直链下载暂未接入（迅雷/百度走分享转存路径）")
     }
 }
