@@ -44,6 +44,14 @@ func main() {
 		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 		fmt.Println("WebKit: DMABUF 渲染器已禁用（防白屏）")
 	}
+	// WebKitGTK 2.54 Skia 合成器的 damage 跟踪 bug：只重绘"变化"区域，上报错误时窗口
+	// 部分空白、直到外部事件（右键/inspector/改尺寸）强制全量重绘——本项目实测多轮
+	// 「数据全通但整屏不显示」。Skia 走 CPU 渲染绕开该路径（Rayburst 同款对策，UI 轻量
+	// 应用性能无感）。要临时恢复 GPU 路径调试：启动前 export WEBKIT_SKIA_ENABLE_CPU_RENDERING=0。
+	if os.Getenv("WEBKIT_SKIA_ENABLE_CPU_RENDERING") == "" {
+		os.Setenv("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1")
+		fmt.Println("WebKit: Skia CPU 渲染已启用（规避 2.54 局部重绘空白 bug）")
+	}
 
 	coreService, err := NewCoreService()
 	if err != nil {
