@@ -215,10 +215,16 @@ func (m *Manager) ApplyGlobalOptions() error {
 	if len(opts) == 0 {
 		return nil
 	}
-	fmt.Printf("APPLY-OPTIONS: sending %v\n", opts)
-	if err := m.aria2.ChangeGlobalOption(opts); err != nil {
-		fmt.Printf("APPLY-OPTIONS: ERR %v\n", err)
-		return fmt.Errorf("应用 aria2 全局选项失败: %w", err)
+	// ★ 逐项发送：aria2-next 对部分选项名（如 bt-enable-dht）不支持 RPC 修改，
+	//   一个 Unknown option 会毒死整个 changeGlobalOption 调用（限速跟着失效）
+	for k, v := range opts {
+		if err := m.aria2.ChangeGlobalOption(map[string]string{k: v}); err != nil {
+			if strings.Contains(err.Error(), "Unknown option") || strings.Contains(err.Error(), "Inval") {
+				fmt.Printf("APPLY-OPTIONS: 跳过不支持的选项 %s=%s（%v）\n", k, v, err)
+				continue
+			}
+			return fmt.Errorf("应用 aria2 全局选项 %s 失败: %w", k, err)
+		}
 	}
 	fmt.Println("APPLY-OPTIONS: OK")
 	return nil
