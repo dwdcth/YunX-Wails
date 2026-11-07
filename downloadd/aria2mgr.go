@@ -402,6 +402,15 @@ func (a *Aria2) Remove(gid string) error {
 	return err
 }
 
+// RemoveDownloadFile 删除 gid 对应任务已下载的文件（上游 aria2 ≥1.37 的
+// aria2.removeDownloadFile：对仍在会话中的已完成/出错/已移除任务有效，不会摘任务本身）。
+// 注意：aria2-next 3.x 尚未实现该 RPC（返回 "No such method: aria2.removeDownloadFile"），
+// 调用方（Manager.RemoveFile）须在报错时回退 os.Remove(savePath)。
+func (a *Aria2) RemoveDownloadFile(gid string) error {
+	_, err := a.call("aria2.removeDownloadFile", gid)
+	return err
+}
+
 // PauseAll / UnpauseAll 全量暂停/恢复。
 func (a *Aria2) PauseAll() error {
 	_, err := a.call("aria2.pauseAll")
@@ -488,7 +497,7 @@ func (a *Aria2) pollTask(t *Task) {
 		// RPC 层故障（进程刚退/重启中）：整轮跳过，不清任务
 		if a.rpcAlive(url, secret) {
 			// RPC 活着但报错：GID 不存在等 → 任务在 aria2 侧已消失
-			_ = a.db.SetStatus(t.ID, StatusError, "任务不存在于 aria2（"+oneLineStr([]byte(err.Error()))+"）")
+			_ = a.db.SetStatus(t.ID, StatusPaused, "aria2 会话已重置，点继续将重新提交")
 		}
 		return
 	}

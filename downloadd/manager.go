@@ -449,8 +449,14 @@ func (m *Manager) Resume(id int64) error {
 		return m.retryAria2(t)
 	}
 	if t.Gid != "" {
-		if err := m.aria2.Unpause(t.Gid); err != nil && !tolerableAria2Err(err) {
-			return err
+		if err := m.aria2.Unpause(t.Gid); err != nil {
+			// GID 过期（应用重启后 aria2 会话重建，旧 GID 不保留）→ 摘旧 gid 重提
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "GID") {
+				return m.retryAria2(t)
+			}
+			if !tolerableAria2Err(err) {
+				return err
+			}
 		}
 	}
 	return m.db.SetStatus(id, StatusPending, "")
