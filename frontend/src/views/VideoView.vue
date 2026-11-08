@@ -208,6 +208,17 @@ async function checkPendingVideo() {
 const NO_LOGIN_PLATFORMS = ['bilibili', 'kuaishou', 'weibo', 'acfun']
 const NO_LOGIN_HINT = 'B 站 / 快手 / 微博 / AcFun 通常无需登录即可解析；小红书 / Pixiv 建议粘贴 Cookie 登录'
 
+// 视频平台全集（与核心 VideoPlatform 枚举对齐；id 即登录用的平台标识，大小写不敏感）
+const VIDEO_PLATFORMS = [
+  { id: 'bilibili', name: '哔哩哔哩' },
+  { id: 'douyin', name: '抖音' },
+  { id: 'xhs', name: '小红书' },
+  { id: 'kuaishou', name: '快手' },
+  { id: 'weibo', name: '微博' },
+  { id: 'acfun', name: 'AcFun' },
+  { id: 'pixiv', name: 'Pixiv' },
+]
+
 const vPlatform = ref('')
 const vCookie = ref('')
 const vBusy = ref(false)
@@ -264,9 +275,14 @@ onMounted(() => {
       <h3>视频账号<span class="tag-m6">登录态管理</span></h3>
       <p class="hint">{{ NO_LOGIN_HINT }}；已登录账号按平台保存，可随时移除</p>
       <div class="row" style="margin-bottom: 10px">
-        <div class="field" style="flex: none; width: 180px">
-          <label>平台标识（如 douyin / bilibili）</label>
-          <input v-model="vPlatform" class="input" placeholder="bilibili" />
+        <div class="field" style="flex: none; width: 200px">
+          <label>视频平台</label>
+          <select v-model="vPlatform" class="input">
+            <option value="" disabled>选择平台…</option>
+            <option v-for="p in VIDEO_PLATFORMS" :key="p.id" :value="p.id">
+              {{ p.name }}{{ NO_LOGIN_PLATFORMS.includes(p.id) ? '（通常无需登录）' : '' }}
+            </option>
+          </select>
         </div>
         <div class="field" style="flex: 1; min-width: 200px">
           <label>登录凭据（Cookie）</label>
