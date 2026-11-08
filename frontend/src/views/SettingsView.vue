@@ -302,8 +302,11 @@ async function fetchTrackers() {
       // 每行一个 URL，去空行去注释
       const list = r.body.split('\n').map((l: string) => l.trim()).filter((l: string) => l && !l.startsWith('#'))
       if (list.length > 0) {
-        if (s.value) s.value.btTrackers = list.join('\n')
-        await save('btTrackers', s.value.btTrackers)
+        const sv = s.value
+        if (sv) {
+          sv.btTrackers = list.join('\n')
+          await save('btTrackers', sv.btTrackers)
+        }
         trackerFlash.value = `已更新 ${list.length} 个 tracker`
       } else {
         trackerFlash.value = '拉取结果为空'

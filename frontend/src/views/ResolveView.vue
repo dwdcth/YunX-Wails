@@ -34,6 +34,64 @@ const transferring = ref<ShareFile | null>(null)
 // GitHub Release 详情（命中 github.com/<owner>/<repo>/releases 时替代网盘分享详情）
 const gh = ref<{ url: string; repo: string; tag: string; assets: GithubAsset[] } | null>(null)
 
+// ---- 插件解析（类油猴）：@match 命中的 http 页面 → PluginParse 出下载链接清单 ----
+
+interface PluginLink { url: string; name?: string; size?: string }
+interface PluginMeta { id: string; name: string; match: string[] }
+
+const pluginRes = ref<{ url: string; pluginName: string; title: string; links: PluginLink[] } | null>(null)
+
+/** 插件清单缓存（丢新 .user.js 进插件目录后重进解析页即可见） */
+let pluginListCache: PluginMeta[] | null = null
+async function pluginList(): Promise<PluginMeta[]> {
+  let list = pluginListCache
+  if (!list) {
+    try {
+      const r = JSON.parse(await CoreService.PluginList())
+      list = (r.ok ? r.plugins : []) as PluginMeta[]
+    } catch { list = [] }
+    pluginListCache = list
+  }
+  return list
+}
+
+/** Tampermonkey 风格 glob：* 通配任意串（与 Go 侧 pluginsys.MatchURL 同口径） */
+function globMatch(pattern: string, url: string): boolean {
+  const re = new RegExp('^' + pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*') + '$', 'i')
+  return re.test(url)
+}
+
+/** 命中插件则解析并展示结果卡；返回是否接住（没命中/解析失败 → 落回正常链路） */
+async function parsePlugin(url: string): Promise<boolean> {
+  const hit = (await pluginList()).find((p) => (p.match ?? []).some((m) => globMatch(m, url)))
+  if (!hit) return false
+  const r = JSON.parse(await CoreService.PluginParse(hit.id, url))
+  if (r.ok && r.links?.length) {
+    pluginRes.value = { url, pluginName: hit.name, title: r.title || hit.name, links: r.links }
+    recordPluginHistory(url, r.title || hit.name, hit.id)
+    flash(`插件解析：${r.title || hit.name} · ${r.links.length} 个链接`)
+    return true
+  }
+  // 插件解析失败不拦截：落回分享/普通下载链路，错误在兜底分支自然透出
+  return false
+}
+
+/** 插件链接下载：磁力走迅雷式选文件弹窗，其余直入普通下载引擎 */
+async function downloadPluginLink(l: PluginLink) {
+  if (/^magnet:/i.test(l.url)) { openMagnetDialog(l.url); return }
+  await submitNormal(l.url)
+}
+
+/** 插件解析记历史（同 URL 1 小时内不重复，对齐 GitHub 分支口径） */
+async function recordPluginHistory(url: string, title: string, pluginId: string) {
+  try {
+    const last = history.value.find((h) => h.url === url)
+    if (last && Date.now() - last.createTime < 3_600_000) return
+    await linkHistoryAdd(url, title, pluginId.toUpperCase())
+    refreshHistory()
+  } catch { /* 记历史失败不影响解析 */ }
+}
+
 // ---- 普通下载分流（ftp/磁力/ed2k/bc1/种子/Metalink → NormalDownloadSubmit，aria2-next / 内置 FTP）----
 
 // 纯 http(s) 直链的「不是网盘分享，是否作为普通下载？」建议（不自动提交，用户点按钮才入队）
@@ -458,12 +516,17 @@ async function parse(text?: string, pwdOverride?: string) {
   error.value = ''
   detail.value = null
   gh.value = null
+  pluginRes.value = null
   normalSuggest.value = ''
   normalSuggestErr.value = ''
   try {
     // GitHub releases 链接：走 github_resolve，不走网盘分享会话
     if (GITHUB_RE.test(url)) {
       await parseGithub(url)
+      return
+    }
+    // 插件（类油猴）@match 命中：插件解析出下载链接清单（电影天堂等资源站）
+    if (/^https?:\/\//i.test(url) && await parsePlugin(url)) {
       return
     }
     const r = await shareResolve(url, p)
@@ -680,6 +743,25 @@ Events.On('clipboard:link', (data: unknown) => {
         </span>
       </div>
       <p class="hint" style="margin: 8px 0 0">经 aria2-next 引擎下载（HTTP 直链），与网盘任务并列显示在下载页</p>
+    </div>
+
+    <!-- 插件解析结果（类油猴 @match 命中的资源站页面） -->
+    <div v-if="pluginRes" class="card">
+      <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+        <div class="row" style="gap: 8px">
+          <span class="chip">插件</span>
+          <b style="font-size: 15px">{{ pluginRes.title }}</b>
+          <span class="chip plain">{{ pluginRes.pluginName }}</span>
+        </div>
+        <button class="btn text small" @click="pluginRes = null">关闭</button>
+      </div>
+      <div v-for="l in pluginRes.links" :key="l.url" class="filerow">
+        <span class="ficon"><AppIcon name="file" /></span>
+        <span class="fname" :title="l.url">{{ l.name || l.url }}</span>
+        <span v-if="l.size" class="fmeta">{{ l.size }}</span>
+        <button class="btn tonal small" @click="downloadPluginLink(l)">下载</button>
+      </div>
+      <p class="hint" style="margin: 8px 0 0">磁力链接走迅雷式选文件；ftp/种子/ed2k 直入下载引擎</p>
     </div>
 
     <!-- GitHub Release 详情（github_resolve 分支，替代网盘分享详情） -->

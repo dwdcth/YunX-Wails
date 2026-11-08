@@ -6,14 +6,19 @@
 package main
 
 import (
+	"embed"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"yunxwailsdemo/pluginsys"
 )
+
+//go:embed plugins/*.user.js
+var builtinPlugins embed.FS
 
 // pluginSys 进程级插件管理器（惰性初始化；不依赖 main 启动时注入）。
 var (
@@ -30,11 +35,40 @@ func pluginSysReady() *pluginsys.Manager {
 				dataDir = filepath.Join(home, ".yunx-wails")
 			}
 		}
+		installBuiltinPlugins(filepath.Join(dataDir, pluginsys.PluginDirName))
 		pluginSys = pluginsys.NewManager(dataDir)
 		pluginSys.SetLogger(log.New(os.Stdout, "[pluginsys] ", log.LstdFlags|log.Lmsgprefix))
 		fmt.Printf("插件系统就绪: 插件目录 %s\n", pluginSys.PluginDir())
 	})
 	return pluginSys
+}
+
+// installBuiltinPlugins 内置插件分发：embed 的 .user.js 写入数据目录插件目录。
+// 已存在的同名文件不覆盖（用户的修改优先）；删掉文件重启即恢复出厂版。
+func installBuiltinPlugins(dir string) {
+	entries, err := builtinPlugins.ReadDir("plugins")
+	if err != nil {
+		return // embed 常量，理论不可达
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".user.js") {
+			continue
+		}
+		dst := filepath.Join(dir, e.Name())
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		data, err := builtinPlugins.ReadFile("plugins/" + e.Name())
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return
+		}
+		if err := os.WriteFile(dst, data, 0644); err == nil {
+			fmt.Printf("已安装内置插件: %s\n", e.Name())
+		}
+	}
 }
 
 // PluginList 插件清单。返回 {ok, plugins:[{id,name,version,match,file}], warnings?}。

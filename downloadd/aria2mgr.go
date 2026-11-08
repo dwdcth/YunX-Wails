@@ -366,6 +366,12 @@ func (a *Aria2) GetVersion() (string, error) {
 
 // AddURI 提交 URL/磁力/ed2k 类下载（uris 至少 1 条），返回 gid。
 func (a *Aria2) AddURI(uris []string, options map[string]any) (string, error) {
+	// ★ 磁力剥 tr= 再提交：资源站自带 tracker 常已失效（实测 dytt 的 t.t789.* 三枚
+	//   全不可达），aria2-next 拿磁力 tr= 后 announce 押死在它们上 → 元数据拿不到。
+	//   剥掉后回落全局 bt-tracker（启动参数已带健康公共列表，BBB 实测 5 秒出元数据）。
+	if len(uris) == 1 && strings.HasPrefix(strings.ToLower(uris[0]), "magnet:") {
+		uris = []string{sanitizeMagnet(uris[0])}
+	}
 	if options == nil {
 		options = map[string]any{}
 	}

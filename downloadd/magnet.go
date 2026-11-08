@@ -349,6 +349,25 @@ func (m *Manager) reAddMagnet(magnet string, add func() (string, error)) (string
 	return "", err
 }
 
+// sanitizeMagnet 剥掉磁力里的 tr= 参数（xt/dn 等其余保留）。
+// 资源站页面的 tr= tracker 存活率极差，且 aria2-next 对磁力 tr= 的处理会让 announce
+// 只押它们；全局 bt-tracker（公共大 tracker 列表）比页面自带的可靠得多。
+func sanitizeMagnet(magnet string) string {
+	i := strings.Index(magnet, "?")
+	if i < 0 {
+		return magnet
+	}
+	prefix, q := magnet[:i+1], magnet[i+1:]
+	var keep []string
+	for _, kv := range strings.Split(q, "&") {
+		if kv == "" || strings.HasPrefix(strings.ToLower(kv), "tr=") {
+			continue
+		}
+		keep = append(keep, kv)
+	}
+	return prefix + strings.Join(keep, "&")
+}
+
 // infoHashOf 从磁力链接提取 info-hash（xt=urn:btih: 后面的十六进制串）
 func infoHashOf(magnet string) string {
 	lower := strings.ToLower(magnet)
