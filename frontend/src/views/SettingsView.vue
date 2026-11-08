@@ -648,7 +648,78 @@ onMounted(() => {
   loadLegacy() // 原版数据探测（纯 Go 文件检查，不影响设置加载）
   loadAria2() // 普通下载引擎状态（Aria2Status；失败不影响设置加载）
   loadAria2Path() // aria2-next 路径回显（kv settings.aria2Path）
+  loadPlugins() // 插件列表（惰性触发内置分发）
 })
+
+// ---- 插件（类油猴）管理：列表/开关/删除/安装 ----
+
+interface PluginRow { id: string; name: string; version: string; match: string[]; enabled: boolean }
+
+const plugins = ref<PluginRow[]>([])
+const pluginUrl = ref('')
+const pluginFlash = ref('')
+const pluginBusy = ref(false)
+const pluginFileInput = ref<HTMLInputElement | null>(null)
+
+function pluginSay(msg: string) {
+  pluginFlash.value = msg
+  setTimeout(() => (pluginFlash.value = ''), 2600)
+}
+
+async function loadPlugins() {
+  try {
+    const r = JSON.parse(await CoreService.PluginList())
+    if (r.ok) plugins.value = r.plugins ?? []
+  } catch { /* 插件系统不可用不影响设置页 */ }
+}
+
+async function togglePlugin(p: PluginRow) {
+  try {
+    const r = JSON.parse(await CoreService.PluginSetEnabled(p.id, !p.enabled))
+    if (r.ok) { p.enabled = !p.enabled; pluginSay(p.enabled ? '已启用' : '已禁用') }
+    else pluginSay(r.error ?? '操作失败')
+  } catch (e) { pluginSay(String(e)) }
+}
+
+async function deletePlugin(p: PluginRow) {
+  if (!confirm(`删除插件「${p.name}」？内置插件重启后会恢复出厂版（彻底停用请用禁用）`)) return
+  try {
+    const r = JSON.parse(await CoreService.PluginDelete(p.id))
+    if (r.ok) { plugins.value = plugins.value.filter((x) => x.id !== p.id); pluginSay('已删除') }
+    else pluginSay(r.error ?? '删除失败')
+  } catch (e) { pluginSay(String(e)) }
+}
+
+async function installFromUrl() {
+  const url = pluginUrl.value.trim()
+  if (!url || pluginBusy.value) return
+  pluginBusy.value = true
+  try {
+    const r = JSON.parse(await CoreService.PluginInstallURL(url))
+    if (r.ok) { pluginUrl.value = ''; pluginSay(`已安装「${r.plugin.name}」v${r.plugin.version}`); await loadPlugins() }
+    else pluginSay(r.error ?? '安装失败')
+  } catch (e) { pluginSay(String(e)) } finally { pluginBusy.value = false }
+}
+
+function pickPluginFile() { pluginFileInput.value?.click() }
+
+function onPluginFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = '' // 允许重复选同一文件
+  if (!f) return
+  const reader = new FileReader()
+  reader.onload = async () => {
+    pluginBusy.value = true
+    try {
+      const r = JSON.parse(await CoreService.PluginInstall(f.name.replace(/\.user\.js$|\.js$/i, ''), String(reader.result)))
+      if (r.ok) { pluginSay(`已安装「${r.plugin.name}」v${r.plugin.version}`); await loadPlugins() }
+      else pluginSay(r.error ?? '安装失败（缺 ==UserScript== 块或 yunx_parse）')
+    } catch (e) { pluginSay(String(e)) } finally { pluginBusy.value = false }
+  }
+  reader.onerror = () => pluginSay(`读取文件失败：${f.name}`)
+  reader.readAsText(f)
+}
 </script>
 
 <template>
@@ -948,6 +1019,33 @@ onMounted(() => {
         <button class="btn tonal small" style="align-self: flex-end" @click="doMirrorRefresh">测速</button>
       </div>
       <p class="hint" style="margin: 0">更新检查与附件下载共用此设置，保存后立即生效</p>
+    </div>
+
+    <!-- 插件（类油猴）：解析页自动匹配 @match，插件解析出下载链接 -->
+    <div class="card">
+      <h3>插件（解析扩展）<span class="chip plain" style="margin-left: 8px">{{ pluginFlash }}</span></h3>
+      <p class="hint">类油猴脚本：解析页粘贴命中 @match 的网址时自动调用，提取片名与下载链接。开发文档见应用数据目录 plugins/DEVELOP.md</p>
+      <div v-if="plugins.length === 0" class="empty"><p>未安装插件——用下方「安装」添加 .user.js 脚本</p></div>
+      <div v-for="p in plugins" :key="p.id" class="row" style="margin-bottom: 10px">
+        <div style="flex: 1; min-width: 0">
+          <div class="row" style="gap: 8px">
+            <b style="font-size: 14px">{{ p.name }}</b>
+            <span class="chip plain">v{{ p.version }}</span>
+          </div>
+          <p class="hint" style="margin: 2px 0 0" :title="p.match.join('  ')">
+            匹配：{{ p.match.join(' · ') || '（全部网址）' }}
+          </p>
+        </div>
+        <i class="switch" :class="{ on: p.enabled }" :title="p.enabled ? '点击禁用' : '点击启用'"
+           @click="togglePlugin(p)" />
+        <button class="btn text small" @click="deletePlugin(p)">删除</button>
+      </div>
+      <div class="row" style="margin-top: 12px; gap: 8px">
+        <input v-model="pluginUrl" class="input" style="flex: 1" placeholder="从 URL 安装（https://…/xxx.user.js）" />
+        <button class="btn tonal small" :disabled="!pluginUrl.trim() || pluginBusy" @click="installFromUrl">安装</button>
+        <button class="btn tonal small" :disabled="pluginBusy" @click="pickPluginFile">本地安装…</button>
+        <input ref="pluginFileInput" type="file" accept=".js,.user.js" style="display: none" @change="onPluginFile" />
+      </div>
     </div>
 
     <div v-if="s" class="card">

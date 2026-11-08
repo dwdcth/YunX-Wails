@@ -37,7 +37,7 @@ const gh = ref<{ url: string; repo: string; tag: string; assets: GithubAsset[] }
 // ---- 插件解析（类油猴）：@match 命中的 http 页面 → PluginParse 出下载链接清单 ----
 
 interface PluginLink { url: string; name?: string; size?: string }
-interface PluginMeta { id: string; name: string; match: string[] }
+interface PluginMeta { id: string; name: string; match: string[]; enabled?: boolean }
 
 const pluginRes = ref<{ url: string; pluginName: string; title: string; links: PluginLink[] } | null>(null)
 
@@ -63,7 +63,8 @@ function globMatch(pattern: string, url: string): boolean {
 
 /** 命中插件则解析并展示结果卡；返回是否接住（没命中/解析失败 → 落回正常链路） */
 async function parsePlugin(url: string): Promise<boolean> {
-  const hit = (await pluginList()).find((p) => (p.match ?? []).some((m) => globMatch(m, url)))
+  const hit = (await pluginList()).find((p) => p.enabled !== false &&
+    (p.match ?? []).some((m) => globMatch(m, url)))
   if (!hit) return false
   const r = JSON.parse(await CoreService.PluginParse(hit.id, url))
   if (r.ok && r.links?.length) {
