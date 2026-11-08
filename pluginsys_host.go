@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"embed"
 	"fmt"
 	"log"
@@ -17,7 +18,7 @@ import (
 	"yunxwailsdemo/pluginsys"
 )
 
-//go:embed plugins/*.user.js
+//go:embed plugins/*.user.js plugins/DEVELOP.md
 var builtinPlugins embed.FS
 
 // pluginSys 进程级插件管理器（惰性初始化；不依赖 main 启动时注入）。
@@ -51,11 +52,28 @@ func installBuiltinPlugins(dir string) {
 		return // embed 常量，理论不可达
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".user.js") {
+		if e.IsDir() {
+			continue
+		}
+		// 开发文档：仅补缺不覆盖（用户可自行修改）
+		if strings.HasSuffix(e.Name(), ".md") {
+			dst := filepath.Join(dir, e.Name())
+			if _, err := os.Stat(dst); err == nil {
+				continue
+			}
+			if data, err := builtinPlugins.ReadFile("plugins/" + e.Name()); err == nil && len(data) > 0 {
+				_ = os.MkdirAll(dir, 0755)
+				_ = os.WriteFile(dst, data, 0644)
+			}
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".user.js") {
 			continue
 		}
 		dst := filepath.Join(dir, e.Name())
-		if _, err := os.Stat(dst); err == nil {
+		_, errOn := os.Stat(dst)
+		_, errOff := os.Stat(dst + ".off") // 禁用态也算已装：重启不把用户禁用的插件装回启用
+		if errOn == nil || errOff == nil {
 			continue
 		}
 		data, err := builtinPlugins.ReadFile("plugins/" + e.Name())
@@ -95,4 +113,57 @@ func (s *CoreService) PluginParse(pluginId, url string) (string, error) {
 		return errorJSON(err.Error()), nil
 	}
 	return res, nil
+}
+
+// PluginInstall 安装/更新插件：content 为 .user.js 全文，id 可空（取 @name 转写）。
+// 返回 {ok, plugin?{id,name,version}, error?}。
+func (s *CoreService) PluginInstall(id, content string) (string, error) {
+	m := pluginSysReady()
+	p, err := m.Install(id, content)
+	if err != nil {
+		return errorJSON(err.Error()), nil
+	}
+	return marshalMust(map[string]any{"ok": true, "plugin": p}), nil
+}
+
+// PluginInstallURL 从 URL 拉取 .user.js 安装（如 GitHub raw / 用户自己的服务器）。
+func (s *CoreService) PluginInstallURL(url string) (string, error) {
+	m := pluginSysReady()
+	raw := s.FetchURL(url) // 复用设置页同款拉取（代理友好、512KB 上限）
+	var fr struct {
+		OK    bool   `json:"ok"`
+		Body  string `json:"body"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(raw), &fr) != nil || !fr.OK || fr.Body == "" {
+		return errorJSON("拉取插件失败: " + raw), nil
+	}
+	id := ""
+	// URL 尾段文件名给个默认 id 建议（Install 里 LoadPlugin 会校验）
+	if i := strings.LastIndexByte(url, '/'); i >= 0 {
+		id = strings.TrimSuffix(url[i+1:], ".user.js")
+	}
+	p, err := m.Install(id, fr.Body)
+	if err != nil {
+		return errorJSON(err.Error()), nil
+	}
+	return marshalMust(map[string]any{"ok": true, "plugin": p}), nil
+}
+
+// PluginSetEnabled 启用/禁用插件（禁用 = 改名 .off，重启不丢、解析不参与匹配）。
+func (s *CoreService) PluginSetEnabled(id string, enabled bool) (string, error) {
+	m := pluginSysReady()
+	if err := m.SetEnabled(id, enabled); err != nil {
+		return errorJSON(err.Error()), nil
+	}
+	return marshalMust(map[string]any{"ok": true}), nil
+}
+
+// PluginDelete 删除插件（内置插件重启恢复出厂版；彻底停用请用禁用）。
+func (s *CoreService) PluginDelete(id string) (string, error) {
+	m := pluginSysReady()
+	if err := m.Delete(id); err != nil {
+		return errorJSON(err.Error()), nil
+	}
+	return marshalMust(map[string]any{"ok": true}), nil
 }

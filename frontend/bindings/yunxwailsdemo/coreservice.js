@@ -295,6 +295,35 @@ export function Ping() {
 }
 
 /**
+ * PluginDelete 删除插件（内置插件重启恢复出厂版；彻底停用请用禁用）。
+ * @param {string} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginDelete(id) {
+    return $Call.ByID(3057087406, id);
+}
+
+/**
+ * PluginInstall 安装/更新插件：content 为 .user.js 全文，id 可空（取 @name 转写）。
+ * 返回 {ok, plugin?{id,name,version}, error?}。
+ * @param {string} id
+ * @param {string} content
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginInstall(id, content) {
+    return $Call.ByID(1613674284, id, content);
+}
+
+/**
+ * PluginInstallURL 从 URL 拉取 .user.js 安装（如 GitHub raw / 用户自己的服务器）。
+ * @param {string} url
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginInstallURL(url) {
+    return $Call.ByID(199525445, url);
+}
+
+/**
  * PluginList 插件清单。返回 {ok, plugins:[{id,name,version,match,file}], warnings?}。
  * 丢新 .user.js 进插件目录后再次调用即可见（免重启）。
  * @returns {$CancellablePromise<string>}
@@ -312,6 +341,16 @@ export function PluginList() {
  */
 export function PluginParse(pluginId, url) {
     return $Call.ByID(3279210048, pluginId, url);
+}
+
+/**
+ * PluginSetEnabled 启用/禁用插件（禁用 = 改名 .off，重启不丢、解析不参与匹配）。
+ * @param {string} id
+ * @param {boolean} enabled
+ * @returns {$CancellablePromise<string>}
+ */
+export function PluginSetEnabled(id, enabled) {
+    return $Call.ByID(2798248452, id, enabled);
 }
 
 /**

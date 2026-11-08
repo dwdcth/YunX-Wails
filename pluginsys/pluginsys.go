@@ -38,6 +38,7 @@ type Plugin struct {
 	Namespace string   `json:"namespace"` // @namespace（缺省空；Tampermonkey 里用于全局唯一，这里仅透出）
 	Version   string   `json:"version"`   // @version（缺省 "0.0.0"）
 	Match     []string `json:"match"`     // @match（+@include 别名），glob 通配；给 UI 自动选插件用
+	Enabled   bool     `json:"enabled"`   // false = 禁用态（文件 .off，不参与解析匹配）
 	File      string   `json:"file"`      // 绝对路径
 	Source    string   `json:"-"`         // 脚本全文（含元数据块，直接整段跑，块是注释无副作用）
 }
@@ -113,28 +114,34 @@ func (m *Manager) loadPlugins() ([]*Plugin, []string) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".user.js") {
+		if e.IsDir() {
 			continue
 		}
-		names = append(names, e.Name())
+		name := e.Name()
+		if strings.HasSuffix(name, ".user.js") || strings.HasSuffix(name, ".user.js.off") {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 
 	plugins := make([]*Plugin, 0, len(names))
 	var problems []string
 	for _, name := range names {
-		path := filepath.Join(dir, name) // 路径由目录列举拼出，pluginId 只做白名单查表——无穿越面
+		enabled := !strings.HasSuffix(name, ".off")
+		loadName := strings.TrimSuffix(name, ".off") // LoadPlugin 的 id=文件名去 .user.js
+		path := filepath.Join(dir, name)             // 路径由目录列举拼出，pluginId 只做白名单查表——无穿越面
 		src, err := os.ReadFile(path)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: 读取失败 %v", name, err))
 			continue
 		}
-		p, err := LoadPlugin(name, string(src))
+		p, err := LoadPlugin(loadName, string(src))
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		p.File = path
+		p.Enabled = enabled
 		plugins = append(plugins, p)
 	}
 	return plugins, problems
@@ -154,6 +161,90 @@ func (m *Manager) FindByID(id string) *Plugin {
 	return nil
 }
 
+// Install 安装/更新插件：写入 <插件目录>/<id>.user.js（LoadPlugin 校验契约，
+// 非法内容报错不落盘）。id 建议由 @name 转写（英文数字连字符），空则用时间戳。
+func (m *Manager) Install(id, source string) (*Plugin, error) {
+	id = sanitizePluginID(id)
+	if id == "" {
+		id = fmt.Sprintf("user%d", time.Now().UnixNano())
+	}
+	p, err := LoadPlugin(id+".user.js", source)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(m.PluginDir(), 0755); err != nil {
+		return nil, fmt.Errorf("建插件目录: %w", err)
+	}
+	// 同 .off（禁用态）残留先清，装新版即启用
+	_ = os.Remove(filepath.Join(m.PluginDir(), id+".user.js.off"))
+	p.File = filepath.Join(m.PluginDir(), id+".user.js")
+	p.Enabled = true
+	if err := os.WriteFile(p.File, []byte(source), 0644); err != nil {
+		return nil, fmt.Errorf("写插件文件: %w", err)
+	}
+	return p, nil
+}
+
+// SetEnabled 启用/禁用：禁用 = 文件改名 <id>.user.js.off（loadPlugins 只扫
+// .user.js，天然跳过）；启用 = 改回。内置分发对 .off 也视为已存在不覆盖。
+func (m *Manager) SetEnabled(id string, enabled bool) error {
+	if !validPluginID(id) {
+		return fmt.Errorf("非法插件 id")
+	}
+	on := filepath.Join(m.PluginDir(), id+".user.js")
+	off := on + ".off"
+	if enabled {
+		if _, err := os.Stat(off); err != nil {
+			return fmt.Errorf("插件不存在或未被禁用")
+		}
+		return os.Rename(off, on)
+	}
+	if _, err := os.Stat(on); err != nil {
+		return fmt.Errorf("插件不存在")
+	}
+	return os.Rename(on, off)
+}
+
+// Delete 占除插件（含禁用态残留）。内置插件删除后重启会恢复出厂版（出厂语义：
+// 彻底停用请用禁用）。
+func (m *Manager) Delete(id string) error {
+	if !validPluginID(id) {
+		return fmt.Errorf("非法插件 id")
+	}
+	on := filepath.Join(m.PluginDir(), id+".user.js")
+	off := on + ".off"
+	if _, err := os.Stat(on); err != nil {
+		if _, err2 := os.Stat(off); err2 != nil {
+			return fmt.Errorf("插件不存在")
+		}
+		return os.Remove(off)
+	}
+	return os.Remove(on)
+}
+
+// sanitizePluginID 插件文件名白名单（防穿越）：仅字母数字._-，其余替换 -；
+// @name 优先取其中的 ASCII 段。
+func sanitizePluginID(s string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-.")
+	if len(out) > 60 {
+		out = out[:60]
+	}
+	return out
+}
+
+func validPluginID(id string) bool {
+	return id != "" && !strings.ContainsAny(id, `/\`)
+}
+
 // Parse 执行插件解析 url。注意：不做 @match 强制（显式指定插件优先，match 是给
 // UI 自动选择用的建议值）。错误也走契约 JSON（ok:false + error），error 返回值仅剩
 // 序列化失败这类不可恢复场景——前端只需认一种形状。
@@ -161,6 +252,9 @@ func (m *Manager) Parse(pluginID, url string) (string, error) {
 	p := m.FindByID(pluginID)
 	if p == nil {
 		return marshalResult(ParseResult{OK: false, Error: fmt.Sprintf("插件不存在: %s", pluginID)}), nil
+	}
+	if !p.Enabled {
+		return marshalResult(ParseResult{OK: false, Error: fmt.Sprintf("插件已禁用: %s", p.Name)}), nil
 	}
 	res, err := m.runParse(p, url)
 	if err != nil {
