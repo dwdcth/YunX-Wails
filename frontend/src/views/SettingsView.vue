@@ -727,7 +727,7 @@ function onPluginFile(ev: Event) {
     <div v-if="loadError" class="banner error">{{ loadError }}</div>
 
     <div v-if="s" class="card">
-      <h3>外观（与原版互通）<span class="chip plain" style="margin-left: 8px">{{ flash }}</span></h3>
+      <h3>外观（与原版互通）<span v-if="flash" class="chip plain" style="margin-left: 8px">{{ flash }}</span></h3>
       <p class="hint">主题三态写 yunx/settings 的 dark_mode，Compose 原版改这里我们同步生效，反之亦然</p>
       <div class="row">
         <div class="seg">
@@ -928,7 +928,7 @@ function onPluginFile(ev: Event) {
           <button :class="{ active: s.proxyMode === 'manual' }" @click="s.proxyMode = 'manual'">手动</button>
         </div>
         <span v-if="sysHost" class="chip plain">系统探测：{{ sysHost }}:{{ sysPort }}</span>
-        <span class="chip plain">{{ hostFlash }}</span>
+        <span v-if="hostFlash" class="chip plain">{{ hostFlash }}</span>
       </div>
       <div v-if="s.proxyMode === 'manual'" class="row" style="margin-bottom: 12px">
         <div class="field" style="flex: 2; min-width: 160px">
@@ -954,7 +954,7 @@ function onPluginFile(ev: Event) {
       </div>
       <div class="row" style="justify-content: space-between">
         <span class="chip plain" v-if="sysHost && false"></span>
-        <span class="chip plain">{{ hostFlash }}</span>
+        <span v-if="hostFlash" class="chip plain">{{ hostFlash }}</span>
       </div>
       <div class="row end" style="margin-top: 10px">
         <button class="btn text small" @click="saveFfmpeg(true)">自动探测并注入</button>
@@ -972,7 +972,7 @@ function onPluginFile(ev: Event) {
         </div>
       </div>
       <div class="row" style="justify-content: space-between">
-        <span class="chip plain">{{ backupFlash }}</span>
+        <span v-if="backupFlash" class="chip plain">{{ backupFlash }}</span>
         <span class="row">
           <button class="btn text small" @click="doImport">导入备份…</button>
           <button class="btn tonal small" @click="doExport">导出备份…</button>
@@ -984,7 +984,7 @@ function onPluginFile(ev: Event) {
       <h3>更新</h3>
       <p class="hint">从 GitHub Release 检查最新版本（经镜像加速）</p>
       <div class="row" style="justify-content: space-between">
-        <span class="chip plain">{{ updateFlash }}</span>
+        <span v-if="updateFlash" class="chip plain">{{ updateFlash }}</span>
         <button class="btn tonal small" :disabled="updateBusy" @click="doUpdateCheck">
           {{ updateBusy ? '检查中…' : '检查更新' }}
         </button>
@@ -1023,7 +1023,7 @@ function onPluginFile(ev: Event) {
 
     <!-- 插件（类油猴）：解析页自动匹配 @match，插件解析出下载链接 -->
     <div class="card">
-      <h3>插件（解析扩展）<span class="chip plain" style="margin-left: 8px">{{ pluginFlash }}</span></h3>
+      <h3>插件（解析扩展）<span v-if="pluginFlash" class="chip plain" style="margin-left: 8px">{{ pluginFlash }}</span></h3>
       <p class="hint">类油猴脚本：解析页粘贴命中 @match 的网址时自动调用，提取片名与下载链接。开发文档见应用数据目录 plugins/DEVELOP.md</p>
       <div v-if="plugins.length === 0" class="empty"><p>未安装插件——用下方「安装」添加 .user.js 脚本</p></div>
       <div v-for="p in plugins" :key="p.id" class="row" style="margin-bottom: 10px">
